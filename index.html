@@ -841,6 +841,10 @@ function App() {
   const [settingsPassInput, setSettingsPassInput] = useState('');
   const [settingsShake, setSettingsShake] = useState(false);
 
+  /* ---------- GOP Y cua Cap quan ly / Ban giam doc ---------- */
+  const [mgrUnlocked, setMgrUnlocked] = useState(false);   // da mo khoa quyen gop y trong phien nay
+  const [feedbackInbox, setFeedbackInbox] = useState(null); // popup nhac nhan vien co gop y moi
+
   const notify = useCallback((msg, type = 'info', ms = 3200) => {
     setNotification({ msg, type });
     setTimeout(() => setNotification(null), ms);
@@ -893,6 +897,22 @@ function App() {
     const offFiles = dbOnValue('excelFiles', (d) => setExcelFiles(d || {}));
     return () => { offRows(); offFiles(); };
   }, []);
+
+  /* ====== Nhac nhan vien khi Ban Giam doc vua gui gop y moi ====== */
+  useEffect(() => {
+    if (!isUnlocked || !currentStaff) return;
+    const list = customers.filter(c =>
+      c.salesRep === currentStaff.name && c.feedback && c.feedback.text
+      && !c.feedback.seenAt && c.feedback.by !== currentStaff.name);
+    if (!list.length) return;
+    const key = `ideco_fbPrompt_${currentStaff.name}`;
+    let shown = [];
+    try { shown = JSON.parse(sessionStorage.getItem(key) || '[]'); } catch (e) {}
+    const fresh = list.filter(c => !shown.includes(`${c.id}_${c.feedback.at}`));
+    if (!fresh.length) return;
+    setFeedbackInbox(fresh);
+    try { sessionStorage.setItem(key, JSON.stringify([...shown, ...fresh.map(c => `${c.id}_${c.feedback.at}`)])); } catch (e) {}
+  }, [customers, currentStaff, isUnlocked]);
 
   /* keep currentStaff in sync with realtime staff list */
   useEffect(() => {
@@ -1174,6 +1194,49 @@ function App() {
     notify('Đã thêm lịch hẹn', 'success', 1800);
   };
 
+  /* ============== GOP Y CUA CAP QUAN LY / BAN GIAM DOC ============== */
+  const handleSaveFeedback = async (customerId, text) => {
+    const t = (text || '').trim();
+    if (!customerId) return false;
+    if (!t) { notify('Vui lòng nhập nội dung góp ý', 'error'); return false; }
+    const fb = {
+      text: t,
+      by: currentStaff?.name || 'Ban Giám đốc',
+      at: Date.now(),
+      seenAt: 0,
+      seenBy: ''
+    };
+    const ok = await dbUpdate(`customers/${customerId}`, { feedback: fb });
+    if (!ok) { notify('Không lưu được góp ý — kiểm tra kết nối mạng rồi thử lại', 'error', 4500); return false; }
+    setCustomers(prev => prev.map(c => c.id === customerId ? { ...c, feedback: fb } : c));
+    notify('Đã lưu góp ý — nhân viên sẽ thấy nút đỏ "Đã góp ý"', 'success', 4200);
+    return true;
+  };
+
+  const handleDeleteFeedback = async (customerId) => {
+    if (!customerId) return false;
+    const ok = await dbRemove(`customers/${customerId}/feedback`);
+    if (!ok) { notify('Không xóa được góp ý — kiểm tra kết nối mạng', 'error'); return false; }
+    setCustomers(prev => prev.map(c => {
+      if (c.id !== customerId) return c;
+      const n = { ...c }; delete n.feedback; return n;
+    }));
+    notify('Đã xóa góp ý', 'success');
+    return true;
+  };
+
+  /* Nhan vien bam nut do "Da gop y" -> mo bao cao nhanh + danh dau da xem */
+  const handleOpenFeedback = (c) => {
+    setQuickReportCustomer(c);
+    setFeedbackInbox(null);
+    const fb = c.feedback;
+    if (fb && fb.text && !fb.seenAt) {
+      const seen = { seenAt: Date.now(), seenBy: currentStaff?.name || '' };
+      dbUpdate(`customers/${c.id}/feedback`, seen);
+      setCustomers(prev => prev.map(x => x.id === c.id ? { ...x, feedback: { ...fb, ...seen } } : x));
+    }
+  };
+
   const handleSaveCustomer = async () => {
     if (currentStaff?.isLocked) {
       if (!selectedCustomerId) { notify('Tài khoản của bạn đã bị khóa, không thể thêm hồ sơ mới!', 'error'); return; }
@@ -1200,6 +1263,9 @@ function App() {
 
     const id = selectedCustomerId || uuid();
     const payload = { ...formData, id, updatedAt: Date.now(), salesRep: currentStaff?.name || formData.salesRep };
+    /* Giu nguyen gop y moi nhat cua BGD (tranh ghi de bang du lieu cu trong form) */
+    const liveFb = customers.find(c => c.id === id)?.feedback;
+    if (liveFb) payload.feedback = liveFb; else delete payload.feedback;
     await dbSet(`customers/${id}`, payload);
     notify('Đã lưu hồ sơ thành công', 'success');
     setView('main');
@@ -2208,6 +2274,14 @@ function App() {
   }
 
   const locked = !!currentStaff?.isLocked;
+  /* Ban ghi dang mo trong "Bao cao nhanh" luon lay ban moi nhat tu Firebase */
+  const liveQuickReport = quickReportCustomer
+    ? (customers.find(c => c.id === quickReportCustomer.id) || quickReportCustomer)
+    : null;
+  /* So gop y chua xem cua nhan vien dang dang nhap */
+  const unseenFeedbackCount = currentStaff
+    ? customers.filter(c => c.salesRep === currentStaff.name && c.feedback && c.feedback.text && !c.feedback.seenAt).length
+    : 0;
 
   /* ============================== MAIN ============================== */
   return (
@@ -2219,8 +2293,37 @@ function App() {
         showTargetPopup={showTargetPopup} targetGoal={targetGoal} setTargetGoal={setTargetGoal}
         handleConfirmTarget={handleConfirmTarget}
         targetWarning={targetWarning} setTargetWarning={setTargetWarning}
-        quickReportCustomer={quickReportCustomer} setQuickReportCustomer={setQuickReportCustomer}
+        quickReportCustomer={liveQuickReport} setQuickReportCustomer={setQuickReportCustomer}
+        mgrUnlocked={mgrUnlocked} setMgrUnlocked={setMgrUnlocked}
+        onSaveFeedback={handleSaveFeedback} onDeleteFeedback={handleDeleteFeedback}
+        notify={notify}
       />
+
+      {/* GOP Y MOI TU BAN GIAM DOC */}
+      <Modal open={!!(feedbackInbox && feedbackInbox.length)} z={1086} max="max-w-md" onClose={() => setFeedbackInbox(null)}>
+        {feedbackInbox && feedbackInbox.length > 0 && (
+          <div className="p-7">
+            <Ring color="bg-rose-50 text-crimson pulse-ring" icon={<I.Message width="26" height="26" />} />
+            <h3 className="font-display text-[19px] font-extrabold text-ink mb-1 text-center">Góp ý từ Ban Giám đốc</h3>
+            <p className="text-[13px] text-slate-500 text-center mb-5">
+              Bạn có <span className="font-extrabold text-crimson">{feedbackInbox.length}</span> góp ý cần xem và triển khai.
+            </p>
+            <div className="space-y-2 max-h-[46vh] overflow-y-auto pr-1">
+              {feedbackInbox.map(c => (
+                <button key={c.id} onClick={() => handleOpenFeedback(c)}
+                  className="spine w-full text-left bg-paper rounded-2xl p-4 pl-5 hover:bg-white hover:shadow-soft transition"
+                  style={{ '--spine': '#d8324b' }}>
+                  <p className="font-bold text-ink text-[14px] truncate">{c.name}</p>
+                  <p className="text-[12px] text-slate-500 mt-1 line-clamp-2">{c.feedback?.text}</p>
+                  <p className="text-[10.5px] font-bold uppercase tracking-wide text-crimson mt-2">Bấm để xem chi tiết</p>
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setFeedbackInbox(null)}
+              className="btn w-full py-4 mt-5 bg-ink text-white text-[13px] uppercase tracking-wider">Để sau</button>
+          </div>
+        )}
+      </Modal>
 
       {/* appointment alert */}
       <Modal open={!!activeAlert} z={1000} max="max-w-sm" shake={activeAlert?.alertType === 'late'}>
@@ -2603,6 +2706,22 @@ function App() {
         {/* ---------- CUSTOMER RECORDS TAB ---------- */}
         {activeTab === 'list' && (
           <div className="p-4 sm:p-6 max-w-3xl mx-auto fade-in pb-28">
+
+            {unseenFeedbackCount > 0 && (
+              <div className="spine bg-rose-50 border border-rose-200 rounded-2xl p-4 pl-5 mb-4 flex items-center gap-3"
+                   style={{ '--spine': '#d8324b' }}>
+                <div className="w-10 h-10 rounded-xl bg-crimson text-white flex items-center justify-center shrink-0 pulse-ring">
+                  <I.Message width="18" height="18" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-display text-[14px] font-extrabold text-crimson">
+                    Bạn có {unseenFeedbackCount} góp ý mới cần triển khai
+                  </p>
+                  <p className="text-[11.5px] text-slate-500 mt-0.5">Bấm nút đỏ "Đã góp ý" trên hồ sơ bên dưới để xem nội dung chỉ đạo.</p>
+                </div>
+              </div>
+            )}
+
             {/* stat strip */}
             <div className="grid grid-cols-4 gap-2 mb-4">
               {[
@@ -2686,14 +2805,23 @@ function App() {
                       </div>
                     )}
 
-                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-line/70">
-                      <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400 flex items-center gap-1.5">
+                    <div className="flex items-center justify-between gap-2 pt-3 mt-3 border-t border-line/70">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400 flex items-center gap-1.5 min-w-0 truncate">
                         <I.User width="12" height="12" /> {c.salesRep}
                       </span>
-                      <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(c); }}
-                        className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px]">
-                        <I.Sparkles width="12" height="12" /> Báo cáo nhanh
-                      </button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {c.feedback?.text && (
+                          <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
+                            title="Ban Giám đốc / Quản lý đã góp ý — bấm để xem"
+                            className={`btn px-3 py-1.5 text-[11px] text-white shadow-lift ${c.feedback.seenAt ? 'bg-rose-400' : 'bg-crimson pulse-ring'}`}>
+                            <I.Message width="12" height="12" /> Đã góp ý
+                          </button>
+                        )}
+                        <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
+                          className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px]">
+                          <I.Sparkles width="12" height="12" /> Báo cáo nhanh
+                        </button>
+                      </div>
                     </div>
                   </article>
                 );
@@ -3082,8 +3210,8 @@ function App() {
                   </div>
                   <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">
                     {filteredResults.map(r => (
-                      <button key={r.id} onClick={() => handleEditCustomer(r)}
-                        className="spine w-full text-left bg-paper rounded-2xl p-4 pl-5 hover:bg-white hover:shadow-soft transition"
+                      <div key={r.id} onClick={() => handleEditCustomer(r)}
+                        className="spine w-full text-left bg-paper rounded-2xl p-4 pl-5 hover:bg-white hover:shadow-soft transition cursor-pointer"
                         style={{ '--spine': tone(r.status).spine }}>
                         <div className="flex justify-between items-start gap-3 mb-1.5">
                           <span className="font-bold text-ink text-[14px] truncate">{r.name}</span>
@@ -3093,7 +3221,18 @@ function App() {
                           <span className="text-[11px] font-bold uppercase text-brand truncate">{r.salesRep}</span>
                           <Badge cls={tone(r.status).chip}>{r.status}</Badge>
                         </div>
-                      </button>
+                        <div className="flex items-center justify-between gap-2 mt-2.5 pt-2.5 border-t border-line/70">
+                          {r.feedback?.text
+                            ? <span className={`text-[10.5px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 ${r.feedback.seenAt ? 'text-slate-400' : 'text-crimson'}`}>
+                                <I.Message width="12" height="12" /> {r.feedback.seenAt ? 'NV đã xem góp ý' : 'Đã góp ý — chờ NV xem'}
+                              </span>
+                            : <span className="text-[10.5px] font-bold uppercase tracking-wide text-slate-300">Chưa có góp ý</span>}
+                          <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(r); }}
+                            className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px] shrink-0">
+                            <I.Sparkles width="12" height="12" /> Báo cáo nhanh
+                          </button>
+                        </div>
+                      </div>
                     ))}
                     {filteredResults.length === 0 && <p className="text-center text-slate-400 text-[13px] py-8">Không có hồ sơ nào khớp bộ lọc.</p>}
                   </div>
@@ -3392,9 +3531,108 @@ function Popups({
   performanceAlert, setPerformanceAlert,
   showTargetPopup, targetGoal, setTargetGoal, handleConfirmTarget,
   targetWarning, setTargetWarning,
-  quickReportCustomer, setQuickReportCustomer
+  quickReportCustomer, setQuickReportCustomer,
+  mgrUnlocked, setMgrUnlocked,
+  onSaveFeedback, onDeleteFeedback, notify
 }) {
   const firedRef = useRef(null);
+
+  /* ================= GOP Y CUA CAP QUAN LY / BAN GIAM DOC ================= */
+  const fb = (quickReportCustomer && quickReportCustomer.feedback && quickReportCustomer.feedback.text)
+    ? quickReportCustomer.feedback : null;
+
+  const [fbEditing, setFbEditing] = useState(false);
+  const [fbText, setFbText]       = useState('');
+  const [fbGate, setFbGate]       = useState(false);
+  const [fbPass, setFbPass]       = useState('');
+  const [fbShake, setFbShake]     = useState(false);
+  const [fbSaving, setFbSaving]   = useState(false);
+  const [fbListening, setFbListening] = useState(false);
+  const fbRecRef  = useRef(null);
+  const fbBaseRef = useRef('');
+
+  const stopFbMic = () => {
+    const r = fbRecRef.current;
+    fbRecRef.current = null;
+    if (r) { r.onend = null; r.onresult = null; try { r.stop(); } catch (e) {} }
+    setFbListening(false);
+  };
+
+  const startFbMic = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { notify && notify('Trình duyệt không hỗ trợ nhận diện giọng nói', 'error'); return; }
+    const rec = new SR();
+    rec.lang = 'vi-VN'; rec.interimResults = true; rec.continuous = true;
+    fbBaseRef.current = fbText || '';
+    let interimNow = '';
+    rec.onresult = (e) => {
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; ++i) {
+        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      if (final) {
+        const p = final.charAt(0).toUpperCase() + final.slice(1);
+        fbBaseRef.current += (fbBaseRef.current ? ' ' : '') + p;
+        interimNow = '';
+      } else interimNow = interim;
+      setFbText(fbBaseRef.current + (interimNow ? (fbBaseRef.current ? ' ' : '') + interimNow : ''));
+    };
+    rec.onend = () => { if (fbRecRef.current === rec) { try { rec.start(); } catch (e) {} } };
+    fbRecRef.current = rec; setFbListening(true);
+    try { rec.start(); } catch (e) {}
+  };
+
+  const toggleFbMic = () => { if (fbRecRef.current) stopFbMic(); else startFbMic(); };
+
+  /* Doi ho so -> dong o soan thao, nap lai noi dung */
+  useEffect(() => {
+    stopFbMic();
+    setFbEditing(false); setFbGate(false); setFbPass(''); setFbSaving(false);
+    setFbText((quickReportCustomer && quickReportCustomer.feedback && quickReportCustomer.feedback.text) || '');
+    return () => stopFbMic();
+  }, [quickReportCustomer ? quickReportCustomer.id : null]);
+
+  const fbWhen = (t) => {
+    try {
+      return new Date(t).toLocaleString('vi-VN',
+        { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch (e) { return ''; }
+  };
+
+  const openFbEditor = () => {
+    if (!mgrUnlocked) { setFbPass(''); setFbGate(true); return; }
+    setFbText(fb ? fb.text : ''); setFbEditing(true);
+  };
+
+  const tryUnlockFb = () => {
+    if (fbPass === MASTER_KEY) {
+      setMgrUnlocked(true); setFbGate(false); setFbPass('');
+      setFbText(fb ? fb.text : ''); setFbEditing(true);
+      notify && notify('Đã mở quyền góp ý cho phiên làm việc này', 'success', 2600);
+    } else {
+      setFbShake(true); setTimeout(() => setFbShake(false), 520);
+      notify && notify('Mã bảo mật không đúng!', 'error');
+    }
+  };
+
+  const doSaveFb = async () => {
+    if (!quickReportCustomer) return;
+    stopFbMic(); setFbSaving(true);
+    const ok = await onSaveFeedback(quickReportCustomer.id, fbText);
+    setFbSaving(false);
+    if (ok) { setFbEditing(false); setQuickReportCustomer(null); }
+  };
+
+  const doDeleteFb = async () => {
+    if (!quickReportCustomer) return;
+    stopFbMic();
+    if (!fb) { setFbEditing(false); setFbText(''); return; }
+    setFbSaving(true);
+    const ok = await onDeleteFeedback(quickReportCustomer.id);
+    setFbSaving(false);
+    if (ok) { setFbEditing(false); setFbText(''); }
+  };
 
   const markSeen = (id) => {
     let seen = [];
@@ -3519,6 +3757,86 @@ function Popups({
                   <Badge cls="bg-slate-50 text-slate-500 border-slate-200">{quickReportCustomer.type}</Badge>
                   {quickReportCustomer.phone && <PhoneAction phone={quickReportCustomer.phone} compact />}
                 </div>
+              </div>
+
+              {/* ================= GÓP Ý CHỈ ĐẠO ================= */}
+              <div className={`spine rounded-2xl p-4 pl-5 border ${fb ? 'bg-rose-50/60 border-rose-200' : 'bg-paper border-line'} ${fbShake ? 'shake' : ''}`}
+                   style={{ '--spine': fb ? '#d8324b' : '#cbd5e1' }}>
+
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="lbl mb-0 flex items-center gap-1.5" style={{ color: fb ? '#d8324b' : undefined }}>
+                    <I.Message width="12" height="12" /> Góp ý chỉ đạo — Quản lý / BGĐ
+                  </p>
+                  {fb && !fbEditing && (
+                    <span className={`text-[10px] font-extrabold uppercase tracking-wide shrink-0 ${fb.seenAt ? 'text-slate-400' : 'text-crimson'}`}>
+                      {fb.seenAt ? 'NV đã xem' : 'Chờ NV xem'}
+                    </span>
+                  )}
+                </div>
+
+                {fb && !fbEditing && (
+                  <React.Fragment>
+                    <p className="text-[13.5px] text-ink leading-relaxed whitespace-pre-line">{fb.text}</p>
+                    <p className="text-[11px] text-slate-500 mt-2.5 font-semibold">
+                      {fb.by || 'Ban Giám đốc'} · {fbWhen(fb.at)}
+                      {fb.seenAt ? ` · NV xem lúc ${fbWhen(fb.seenAt)}` : ''}
+                    </p>
+                  </React.Fragment>
+                )}
+
+                {!fb && !fbEditing && (
+                  <p className="text-[12.5px] text-slate-400">Chưa có góp ý nào cho hồ sơ này.</p>
+                )}
+
+                {fbEditing && (
+                  <div className="space-y-2.5">
+                    <textarea value={fbText} onChange={e => setFbText(e.target.value)} rows={5} autoFocus
+                      placeholder="Nhập ý kiến chỉ đạo để nhân viên triển khai..."
+                      className="fld" style={{ resize: 'vertical', minHeight: '124px', lineHeight: 1.6 }} />
+                    <button onClick={toggleFbMic}
+                      className={`btn w-full py-2.5 text-[12px] ${fbListening ? 'bg-crimson text-white' : 'bg-white border border-line text-slate-500'}`}>
+                      {fbListening
+                        ? <React.Fragment><span className="w-2.5 h-2.5 bg-white rounded-sm pulse-ring" /> Đang nghe — bấm để dừng</React.Fragment>
+                        : <React.Fragment><I.Mic width="14" height="14" /> Nói để nhập nội dung</React.Fragment>}
+                    </button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={doSaveFb} disabled={fbSaving}
+                        className="btn py-3 bg-crimson text-white text-[12.5px] uppercase tracking-wide shadow-lift disabled:opacity-60">
+                        <I.Save width="15" height="15" /> {fbSaving ? 'Đang lưu…' : 'Lưu'}
+                      </button>
+                      <button onClick={doDeleteFb} disabled={fbSaving}
+                        className="btn py-3 bg-white border border-rose-200 text-crimson text-[12.5px] uppercase tracking-wide disabled:opacity-60">
+                        <I.Trash width="15" height="15" /> Xóa
+                      </button>
+                    </div>
+                    <button onClick={() => { stopFbMic(); setFbEditing(false); setFbText(fb ? fb.text : ''); }}
+                      className="btn w-full py-2.5 bg-paper text-slate-500 text-[12px]">Hủy bỏ</button>
+                  </div>
+                )}
+
+                {fbGate && !fbEditing && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-[11.5px] text-slate-500 font-semibold">Nhập mã bảo mật cấp quản lý để viết góp ý:</p>
+                    <input type="password" value={fbPass} autoFocus
+                      onChange={e => setFbPass(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && tryUnlockFb()}
+                      placeholder="Mã bảo mật..." className="fld" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={tryUnlockFb} className="btn py-3 bg-ink text-white text-[12.5px] uppercase tracking-wide">
+                        <I.Key width="15" height="15" /> Mở khóa
+                      </button>
+                      <button onClick={() => { setFbGate(false); setFbPass(''); }}
+                        className="btn py-3 bg-paper text-slate-500 text-[12.5px] uppercase tracking-wide">Hủy</button>
+                    </div>
+                  </div>
+                )}
+
+                {!fbEditing && !fbGate && (
+                  <button onClick={openFbEditor}
+                    className="btn w-full py-3 mt-3 bg-crimson text-white text-[12.5px] uppercase tracking-wide shadow-lift">
+                    <I.Edit width="15" height="15" /> {fb ? 'Sửa / Xóa góp ý' : 'Góp ý'}
+                  </button>
+                )}
               </div>
 
               <div>
