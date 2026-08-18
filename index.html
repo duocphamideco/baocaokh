@@ -420,6 +420,92 @@ const geminiKeys = () => geminiKeyEntries().map(x => x.key);
 const maskGeminiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
 const isKeyCooling = (key) => (GEMINI_KEY_COOLDOWN.get(key) || 0) > Date.now();
 
+/* ---------------- HUYỀN TURBO — Gemini 3.7 Flash qua Kie.ai ----------------
+   Chỉ dùng cho màn hình Huyền gợi ý khi người dùng chủ động BẬT Turbo.
+   Không thay đổi 3 API Gemini dự phòng của chế độ thường.
+*/
+const KIE_TURBO_API_KEY = "6a11cd4b360b77e7cd515b8296a00e6a";
+const KIE_TURBO_ENDPOINT = 'https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:streamGenerateContent';
+
+function extractKieGeminiText(payload) {
+  const chunks = Array.isArray(payload) ? payload : [payload];
+  let out = '';
+  for (const chunk of chunks) {
+    const candidates = chunk?.candidates || [];
+    for (const c of candidates) {
+      const parts = c?.content?.parts || [];
+      for (const p of parts) {
+        /* Kie/Gemini có thể trả phần suy nghĩ riêng. Không đưa thought ra giao diện. */
+        if (p?.thought === true) continue;
+        if (typeof p?.text === 'string') out += p.text;
+      }
+    }
+  }
+  return out.trim();
+}
+
+async function callHuyenTurbo(prompt, { json = true } = {}) {
+  if (!KIE_TURBO_API_KEY) throw new Error('NO_TURBO_KEY');
+
+  const body = {
+    stream: true,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      ...(json ? { responseMimeType: 'application/json' } : {}),
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingLevel: 'high'
+      }
+    }
+  };
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 90000);
+  let res;
+  try {
+    res = await fetch(KIE_TURBO_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${KIE_TURBO_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal: ctl.signal
+    });
+  } finally { clearTimeout(timer); }
+
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 600); } catch (e) {}
+    const err = new Error(`TURBO_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  const rawText = await res.text();
+  let answer = '';
+
+  /* Kie có thể trả SSE (data: {...}) hoặc JSON/JSON-array tùy gateway. */
+  if (/^\s*data:/m.test(rawText)) {
+    const payloads = [];
+    for (const line of rawText.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const data = t.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try { payloads.push(JSON.parse(data)); } catch (e) {}
+    }
+    answer = extractKieGeminiText(payloads);
+  } else {
+    try { answer = extractKieGeminiText(JSON.parse(rawText)); }
+    catch (e) { answer = rawText.trim(); }
+  }
+
+  if (!answer) throw new Error('TURBO_EMPTY');
+  window.__IDECO_HUYEN_TURBO_LAST__ = { model: 'gemini-3.7-flash', provider: 'Kie.ai', at: Date.now() };
+  return answer;
+}
+
 async function callGemini(prompt, { model = 'gemini-3.6-flash', json = true, tools = null, temperature } = {}) {
   const entries = geminiKeyEntries();
   if (!entries.length) throw new Error('NO_KEY');
@@ -680,7 +766,7 @@ function normalizeKnowledgeEntries(d) {
     .sort((a,b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }
 
-async function analyzeLatestCustomerStrategy(customer) {
+async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   if (!customer) throw new Error('NO_CUSTOMER');
 
   /* Luon doc kho kien thuc moi nhat tu Firebase tai thoi diem bam nut */
@@ -746,7 +832,9 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   "finalAdvice":"Kết luận hướng xử lý tốt nhất, ngắn gọn nhưng cụ thể"
 }`;
 
-  const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
+  const raw = turbo
+    ? await callHuyenTurbo(prompt, { json: true })
+    : await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
   const r = safeJson(raw, null);
   if (!r) throw new Error('AI_BAD_JSON');
   return r;
@@ -4193,17 +4281,41 @@ function Popups({
   const [advisorResult, setAdvisorResult] = useState(null);
   const [advisorError, setAdvisorError] = useState('');
 
+  /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng. */
+  const [huyenTurbo, setHuyenTurbo] = useState(() => {
+    try { return sessionStorage.getItem('ideco_huyen_turbo') === '1'; } catch (e) { return false; }
+  });
+  const [turboNotice, setTurboNotice] = useState(false);
+  const turboNoticeTimerRef = useRef(null);
+
+  const toggleHuyenTurbo = () => {
+    setHuyenTurbo(prev => {
+      const next = !prev;
+      try { sessionStorage.setItem('ideco_huyen_turbo', next ? '1' : '0'); } catch (e) {}
+      if (next) {
+        setTurboNotice(true);
+        clearTimeout(turboNoticeTimerRef.current);
+        turboNoticeTimerRef.current = setTimeout(() => setTurboNotice(false), 7000);
+        notify && notify('Huyền Turbo đã bật — Huyền sẽ ráng hết sức để phản hồi bạn nhé!', 'warning');
+      } else {
+        setTurboNotice(false);
+        notify && notify('Huyền Turbo đã tắt — quay về chế độ thường.', 'info');
+      }
+      return next;
+    });
+  };
+
   const runAdvisor = async () => {
     if (!quickReportCustomer) return;
     setAdvisorBusy(true); setAdvisorError(''); setAdvisorResult(null);
     try {
-      const r = await analyzeLatestCustomerStrategy(quickReportCustomer);
+      const r = await analyzeLatestCustomerStrategy(quickReportCustomer, { turbo: huyenTurbo });
       setAdvisorResult(r);
     } catch (e) {
       const msg = String(e && e.message || e);
-      setAdvisorError(msg === 'NO_KEY'
-        ? 'Chưa có Gemini API key. Vào Hệ thống → Cài đặt AI để nhập key.'
-        : 'AI chưa phân tích được hồ sơ này. Kiểm tra kết nối hoặc API key rồi thử lại.');
+      setAdvisorError(huyenTurbo
+        ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để dùng 3 API Gemini dự phòng.'
+        : (msg === 'NO_KEY' ? 'Chưa có Gemini API key. Vào Hệ thống → Cài đặt AI để nhập key.' : 'AI chưa phân tích được hồ sơ này. Kiểm tra kết nối hoặc API key rồi thử lại.'));
     } finally { setAdvisorBusy(false); }
   };
 
@@ -4221,31 +4333,31 @@ function Popups({
       }
       setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
       try {
-        const r = await analyzeLatestCustomerStrategy(advisorCustomer);
+        const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo });
         if (!cancelled) setDirectAdvisorResult(r);
       } catch (e) {
         if (cancelled) return;
         const msg = String(e && e.message || e);
-        setDirectAdvisorError(msg === 'NO_KEY'
-          ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.'
-          : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.');
+        setDirectAdvisorError(huyenTurbo
+          ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để quay về Gemini 3.6 Flash + 3 API dự phòng.'
+          : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
       } finally { if (!cancelled) setDirectAdvisorBusy(false); }
     };
     run();
     return () => { cancelled = true; };
-  }, [advisorCustomer ? advisorCustomer.id : null, advisorCustomer ? advisorCustomer.updatedAt : null]);
+  }, [advisorCustomer ? advisorCustomer.id : null, advisorCustomer ? advisorCustomer.updatedAt : null, huyenTurbo]);
 
   const rerunDirectAdvisor = async () => {
     if (!advisorCustomer) return;
     setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
     try {
-      const r = await analyzeLatestCustomerStrategy(advisorCustomer);
+      const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo });
       setDirectAdvisorResult(r);
     } catch (e) {
       const msg = String(e && e.message || e);
-      setDirectAdvisorError(msg === 'NO_KEY'
-        ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.'
-        : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.');
+      setDirectAdvisorError(huyenTurbo
+        ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để quay về Gemini 3.6 Flash + 3 API dự phòng.'
+        : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
     } finally { setDirectAdvisorBusy(false); }
   };
 
@@ -4455,6 +4567,24 @@ function Popups({
               <button onClick={() => setAdvisorCustomer(null)} className="btn w-9 h-9 bg-paper text-slate-400 hover:text-crimson shrink-0"><I.X width="16" height="16" /></button>
             </div>
 
+            <div className={`rounded-2xl border p-3.5 mb-4 transition ${huyenTurbo ? 'border-amber-300 bg-amber-50/80' : 'border-line bg-white'}`}>
+              <div className="flex items-center gap-3">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${huyenTurbo ? 'bg-amber2 text-white shadow-lift' : 'bg-paper text-slate-400'}`}>⚡</div>
+                <div className="min-w-0 mr-auto">
+                  <p className="font-display text-[13.5px] font-extrabold text-ink">Huyền Turbo</p>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">{huyenTurbo ? 'BẬT · Gemini 3.7 Flash · Kie.ai · suy luận cao' : 'TẮT · đang dùng Gemini 3.6 Flash + API dự phòng'}</p>
+                </div>
+                <button onClick={toggleHuyenTurbo} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'}`} aria-label="Bật hoặc tắt Huyền Turbo">
+                  <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow transition-all ${huyenTurbo ? 'left-8' : 'left-1'}`}></span>
+                </button>
+              </div>
+              {turboNotice && huyenTurbo && (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-white/80 px-3.5 py-3 text-[11.5px] font-semibold text-amber-800 leading-relaxed fade-in">
+                  “Huyền đang ráng hết sức để phản hồi bạn nhé — tuy nhiên nhấn nút này Huyền hơi bị mệt tí, tốn tiền tí nhưng sẽ áp dụng nhé.”
+                </div>
+              )}
+            </div>
+
             <div className="spine bg-paper rounded-2xl p-4 pl-5 mb-4" style={{ '--spine': tone(advisorCustomer.status).spine }}>
               <div className="flex flex-wrap items-center gap-2">
                 <p className="font-display text-[16px] font-extrabold text-ink mr-auto">{advisorCustomer.name}</p>
@@ -4471,7 +4601,7 @@ function Popups({
               <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-center fade-in">
                 <I.Loader width="22" height="22" className="animate-spin text-amber2 mx-auto" />
                 <p className="font-display text-[15px] font-extrabold text-ink mt-3">Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý...</p>
-                <p className="text-[11.5px] text-slate-500 mt-1">Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.</p>
+                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang dùng Gemini 3.7 Flash trên Kie.ai với suy luận cao và đối chiếu Kho kiến thức nội bộ.' : 'Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.'}</p>
               </div>
             )}
 
@@ -4683,10 +4813,14 @@ function Popups({
                     <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Phân tích bản lưu mới nhất và đối chiếu Kho kiến thức nội bộ trong Cài đặt.</p>
                   </div>
                 </div>
+                <button onClick={toggleHuyenTurbo} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'}`}>
+                  ⚡ Huyền Turbo: {huyenTurbo ? 'BẬT · Gemini 3.7 Flash' : 'TẮT'}
+                </button>
+                {turboNotice && huyenTurbo && <div className="mb-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-[10.8px] font-semibold text-amber-800 leading-relaxed">Huyền đang ráng hết sức để phản hồi bạn nhé — tuy nhiên nhấn nút này Huyền hơi bị mệt tí, tốn tiền tí nhưng sẽ áp dụng nhé.</div>}
                 <button onClick={runAdvisor} disabled={advisorBusy || !quickReportCustomer.report}
                   className="btn w-full py-3.5 bg-violet2 text-white text-[12.5px] uppercase tracking-wide shadow-lift disabled:opacity-50">
                   {advisorBusy ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Sparkles width="15" height="15" />}
-                  {advisorBusy ? 'Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý…' : 'Phân tích bản mới nhất & đề xuất xử lý'}
+                  {advisorBusy ? (huyenTurbo ? 'Huyền Turbo đang ráng phân tích…' : 'Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý…') : (huyenTurbo ? 'Phân tích bằng Huyền Turbo' : 'Phân tích bản mới nhất & đề xuất xử lý')}
                 </button>
 
                 {advisorError && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-[11.5px] font-semibold text-crimson">{advisorError}</div>}
