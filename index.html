@@ -378,6 +378,7 @@ const CustomerType = {
   NHA_THUOC: 'Nhà Thuốc',
   CHUOI_NHA_THUOC: 'Chuỗi Nhà Thuốc',
   DAI_LY: 'Đại Lý',
+  DAI_LY_MY_PHAM: 'Đại Lý Mỹ Phẩm',
   CONG_TY_DUOC: 'Công Ty Dược',
   KHAC: 'Khác'
 };
@@ -401,7 +402,7 @@ const geminiKeys = () => {
   return keys;
 };
 
-async function callGemini(prompt, { model = 'gemini-2.5-flash', json = true, tools = null, temperature } = {}) {
+async function callGemini(prompt, { model = 'gemini-3.6-flash', json = true, tools = null, temperature } = {}) {
   const keys = geminiKeys();
   if (!keys.length) throw new Error('NO_KEY');
   let lastErr = null;
@@ -478,7 +479,7 @@ async function analyzeAndRefineReport(text) {
     }
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-2.5-flash', json: true });
+    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
     const r = safeJson(raw, null);
     if (!r) return { status: 'warning', text, message: 'Lỗi xử lý dữ liệu AI.' };
     return { status: 'success', text: r.refinedText || text, message: r.advice || 'Đã chuẩn hóa văn bản.' };
@@ -487,6 +488,60 @@ async function analyzeAndRefineReport(text) {
       return { status: 'warning', text, message: 'Chưa có API key Gemini. Vào Hệ thống → Cài đặt AI để nhập key dự phòng.' };
     }
     return { status: 'warning', text, message: 'Lỗi kết nối AI, vui lòng thử lại.' };
+  }
+}
+
+async function analyzeVoiceCustomerDeclaration(text) {
+  const empty = {
+    name: '', contactPerson: '', phone: '', address: '', province: '', type: '',
+    report: '', missing: [], summary: ''
+  };
+  if (!text || !text.trim()) return { ...empty, missing: ['Nội dung khai báo'] };
+  const prompt = `
+Bạn là trợ lý nhập liệu CRM của IDECO. Hãy đọc nội dung khai báo bằng giọng nói/văn bản của nhân viên kinh doanh và TRÍCH XUẤT thông tin.
+
+NGUYÊN TẮC BẮT BUỘC:
+- Chỉ lấy dữ liệu thật sự xuất hiện hoặc được nói rõ trong văn bản. KHÔNG tự bịa, KHÔNG tự tra cứu bên ngoài.
+- Giữ nguyên tên doanh nghiệp/nhà thuốc, tên người liên hệ, số điện thoại, địa chỉ nếu có.
+- "type" chỉ được chọn đúng MỘT trong: "Nhà Thuốc", "Công Ty Dược", "Đại Lý Mỹ Phẩm", "Chuỗi Nhà Thuốc", "Khác". Nếu không đủ căn cứ thì để trống.
+- "province" chỉ điền tỉnh/thành phố nếu xác định được trực tiếp từ địa chỉ được khai báo.
+- "report" là phần nội dung đã trao đổi/cập nhật với khách hàng; viết rõ ràng, chuyên nghiệp nhưng KHÔNG thêm sự kiện mới. Không lặp lại thông tin định danh nếu không cần thiết.
+- "missing" phải liệt kê các mục còn thiếu trong 6 nhóm bắt buộc: Tên doanh nghiệp/khách hàng, Người liên hệ, Số điện thoại, Địa chỉ, Đối tượng khách hàng, Nội dung trao đổi/cập nhật.
+- Nếu văn bản có nội dung nhưng chưa đủ để xác định một trường, trường đó để chuỗi rỗng và đưa tên trường vào "missing".
+
+VĂN BẢN KHAI BÁO:
+${text}
+
+Chỉ trả về JSON chuẩn theo cấu trúc:
+{
+  "name":"",
+  "contactPerson":"",
+  "phone":"",
+  "address":"",
+  "province":"",
+  "type":"",
+  "report":"",
+  "missing":[],
+  "summary":""
+}`;
+  try {
+    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.1 });
+    const r = safeJson(raw, null);
+    if (!r || typeof r !== 'object') return empty;
+    return {
+      name: String(r.name || '').trim(),
+      contactPerson: String(r.contactPerson || '').trim(),
+      phone: String(r.phone || '').trim(),
+      address: String(r.address || '').trim(),
+      province: String(r.province || '').trim(),
+      type: String(r.type || '').trim(),
+      report: String(r.report || '').trim(),
+      missing: Array.isArray(r.missing) ? r.missing.filter(Boolean).map(String) : [],
+      summary: String(r.summary || '').trim()
+    };
+  } catch (e) {
+    if (e && e.message === 'NO_KEY') throw e;
+    throw new Error('VOICE_AI_FAIL');
   }
 }
 
@@ -503,7 +558,7 @@ async function searchCustomerInfo(inputData) {
     Trả về mảng JSON: [{"name":"","representative":"","phone":"","address":"","establishedYear":""}]
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-2.5-flash', json: true });
+    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
     return safeJson(raw, []);
   } catch (e) { return []; }
 }
@@ -525,7 +580,7 @@ async function searchSingleCustomerPhone(companyName) {
   `;
   try {
     const raw = await callGemini(prompt, {
-      model: 'gemini-2.5-flash', json: false,
+      model: 'gemini-3.6-flash', json: false,
       tools: [{ google_search: {} }], temperature: 0.2
     });
     return safeJson(raw, empty);
@@ -763,6 +818,14 @@ function App() {
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isFindingInfo, setIsFindingInfo] = useState(false);
   const [isGlobalListening, setIsGlobalListening] = useState(false);
+  /* Khung khai bao nhanh bang giong noi / van ban */
+  const [voiceDeclaration, setVoiceDeclaration] = useState('');
+  const [isVoiceDeclListening, setIsVoiceDeclListening] = useState(false);
+  const [isVoiceDeclAnalyzing, setIsVoiceDeclAnalyzing] = useState(false);
+  const [voiceDeclNotice, setVoiceDeclNotice] = useState(null);
+  const voiceDeclRecognitionRef = useRef(null);
+  const voiceDeclListeningRef = useRef(false);
+  const voiceDeclBaseRef = useRef('');
   const activeFieldRef = useRef(null);
   const globalRecognitionRef = useRef(null);
 
@@ -2074,6 +2137,97 @@ function App() {
     } catch (e) {}
   }, [selectedMicId]);
 
+  /* ============== KHAI BAO NHANH: speech -> text -> AI fill form ============== */
+  const stopVoiceDeclaration = useCallback(() => {
+    voiceDeclListeningRef.current = false;
+    setIsVoiceDeclListening(false);
+    const r = voiceDeclRecognitionRef.current;
+    voiceDeclRecognitionRef.current = null;
+    if (r) { r.onend = null; r.onresult = null; try { r.stop(); } catch (e) {} }
+  }, []);
+
+  const startVoiceDeclaration = useCallback(async () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { notify('Trình duyệt không hỗ trợ chuyển giọng nói thành văn bản. Nên dùng Chrome/Edge mới.', 'error', 5000); return; }
+    if (voiceDeclListeningRef.current) { stopVoiceDeclaration(); return; }
+    /* Tranh 2 bo nhan dien chay cung luc */
+    if (isGlobalListeningRef.current) {
+      isGlobalListeningRef.current = false; setIsGlobalListening(false);
+      const old = globalRecognitionRef.current;
+      if (old) { old.onend = null; old.onresult = null; try { old.stop(); } catch (e) {} }
+    }
+    if (listeningFieldRef.current) { listeningFieldRef.current = null; setListeningField(null); try { recognitionRef.current?.stop(); } catch (e) {} }
+
+    await ensureSelectedMicStream();
+    const rec = new SR();
+    rec.lang = 'vi-VN'; rec.interimResults = true; rec.continuous = true;
+    voiceDeclBaseRef.current = voiceDeclaration || '';
+    let interimNow = '';
+    rec.onresult = (e) => {
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; ++i) {
+        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      if (final) {
+        const p = final.trim();
+        if (p) voiceDeclBaseRef.current += (voiceDeclBaseRef.current.trim() ? ' ' : '') + p;
+        interimNow = '';
+      } else interimNow = interim;
+      setVoiceDeclaration(voiceDeclBaseRef.current + (interimNow ? (voiceDeclBaseRef.current.trim() ? ' ' : '') + interimNow : ''));
+    };
+    rec.onerror = (e) => {
+      if (e && ['not-allowed','service-not-allowed'].includes(e.error)) {
+        stopVoiceDeclaration(); notify('Micro đang bị chặn. Hãy cấp quyền Micro cho trang web.', 'error', 5000);
+      }
+    };
+    rec.onend = () => {
+      if (voiceDeclListeningRef.current) setTimeout(() => {
+        if (voiceDeclListeningRef.current) { try { rec.start(); } catch (e) {} }
+      }, 180);
+    };
+    voiceDeclRecognitionRef.current = rec;
+    voiceDeclListeningRef.current = true; setIsVoiceDeclListening(true);
+    try { rec.start(); } catch (e) { stopVoiceDeclaration(); notify('Không khởi động được Micro.', 'error'); }
+  }, [voiceDeclaration, ensureSelectedMicStream, notify, stopVoiceDeclaration]);
+
+  const handleAnalyzeVoiceDeclaration = async () => {
+    const text = (voiceDeclaration || '').trim();
+    if (!text) { notify('Hãy nói hoặc nhập nội dung khai báo trước khi phân tích AI.', 'warning'); return; }
+    stopVoiceDeclaration();
+    setIsVoiceDeclAnalyzing(true); setVoiceDeclNotice(null);
+    try {
+      const r = await analyzeVoiceCustomerDeclaration(text);
+      const allowedTypes = Object.values(CustomerType);
+      setFormData(prev => ({
+        ...prev,
+        name: r.name || prev.name,
+        contactPerson: r.contactPerson || prev.contactPerson,
+        phone: r.phone ? normPhone(r.phone) : prev.phone,
+        address: r.address || prev.address,
+        province: (r.province && VIETNAM_PROVINCES.includes(r.province)) ? r.province : prev.province,
+        type: (r.type && allowedTypes.includes(r.type)) ? r.type : prev.type,
+        report: r.report || prev.report
+      }));
+      const missing = r.missing || [];
+      if (missing.length) {
+        setVoiceDeclNotice({ type: 'warning', text: `AI đã điền các thông tin nhận diện được. Còn thiếu: ${missing.join(', ')}.` });
+        notify(`Còn thiếu: ${missing.join(', ')}`, 'warning', 6500);
+      } else {
+        setVoiceDeclNotice({ type: 'success', text: 'AI đã nhận diện đủ các mục khai báo và tự động điền vào biểu mẫu bên dưới.' });
+        notify('Đã phân tích và tự động điền thông tin khách hàng', 'success', 3600);
+      }
+    } catch (e) {
+      if (e && e.message === 'NO_KEY') {
+        setVoiceDeclNotice({ type: 'error', text: 'Chưa có Gemini API key. Vào Hệ thống → Cài đặt AI để nhập/lưu key.' });
+        notify('Chưa có Gemini API key', 'error', 5000);
+      } else {
+        setVoiceDeclNotice({ type: 'error', text: 'Gemini chưa phân tích được nội dung. Kiểm tra mạng/API key rồi thử lại.' });
+        notify('Lỗi kết nối Gemini khi phân tích khai báo', 'error');
+      }
+    } finally { setIsVoiceDeclAnalyzing(false); }
+  };
+
   /* ============== speech to text ============== */
   const applyTranscript = (field, txt) => {
     if (field === 'appointmentContent') setNewAppointment(prev => ({ ...prev, content: txt }));
@@ -3348,20 +3502,41 @@ function App() {
           </div>
         </div>
 
-        {/* voice bar */}
-        <div className="bg-white border-b border-line px-4 py-2.5 flex items-center gap-2 shrink-0">
-          <button onClick={toggleGlobalListening}
-            className={`btn flex-1 py-2.5 text-[12px] border ${isGlobalListening ? 'bg-rose-50 text-crimson border-rose-200' : 'bg-paper text-slate-500 border-transparent'}`}>
-            {isGlobalListening
-              ? <><span className="w-2.5 h-2.5 bg-crimson rounded-sm pulse-ring" /> Đang nghe — bấm để dừng</>
-              : <><I.Mic width="15" height="15" /> Nhập liệu bằng giọng nói</>}
-          </button>
-          <button onClick={() => setShowMicPicker(true)}
-            className="btn px-3 py-2.5 text-[11.5px] font-bold bg-paper text-slate-500 border border-transparent hover:text-brand shrink-0"
-            title="Chọn thiết bị micro">
-            <I.Settings width="14" height="14" />
-            <span className="hidden sm:inline max-w-[130px] truncate">{selectedMicLabel || 'Chọn micro'}</span>
-          </button>
+        {/* Khai bao nhanh bang giong noi / van ban + AI */}
+        <div className="bg-white border-b border-line px-4 py-3 shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div>
+                <p className="font-display text-[13px] font-extrabold text-ink flex items-center gap-2"><I.Mic width="15" height="15" className="text-brand" /> Khai báo nhanh bằng giọng nói / văn bản</p>
+                <p className="text-[10.5px] text-slate-400 mt-0.5">Gemini 3.6 Flash sẽ đọc hiểu và tự điền biểu mẫu phía dưới</p>
+              </div>
+              <button onClick={() => setShowMicPicker(true)} className="btn px-3 py-2 bg-paper text-slate-500 text-[11px]" title="Chọn thiết bị micro">
+                <I.Settings width="13" height="13" /> <span className="max-w-[150px] truncate">{selectedMicLabel || 'Chọn micro'}</span>
+              </button>
+            </div>
+            <textarea value={voiceDeclaration} onChange={e => setVoiceDeclaration(e.target.value)}
+              placeholder="Khai tên doanh nghiệp, tên người liên hệ, số điện thoại, địa chỉ, thuộc dạng (Nhà Thuốc, Công ty dược, đại lý mỹ phẩm, chuỗi nhà thuốc, khác). Hãy trình bày càng cụ thể nội dung đã trao đổi với khách hàng có tính cập nhật."
+              className="fld leading-relaxed text-[13px]"
+              style={{ resize: 'both', minHeight: '118px', maxWidth: '100%', width: '100%', overflow: 'auto' }} />
+            <div className="grid sm:grid-cols-2 gap-2 mt-2">
+              <button onClick={startVoiceDeclaration}
+                className={`btn py-3 text-[12px] border ${isVoiceDeclListening ? 'bg-crimson text-white border-crimson' : 'bg-blue-50 text-brand border-blue-100'}`}>
+                {isVoiceDeclListening
+                  ? <><span className="w-2.5 h-2.5 bg-white rounded-sm pulse-ring" /> Đang ghi giọng nói — bấm để dừng</>
+                  : <><I.Mic width="15" height="15" /> Chuyển giọng nói thành văn bản</>}
+              </button>
+              <button onClick={handleAnalyzeVoiceDeclaration} disabled={isVoiceDeclAnalyzing || !voiceDeclaration.trim()}
+                className="btn py-3 bg-violet2 text-white text-[12px] shadow-lift disabled:opacity-50">
+                {isVoiceDeclAnalyzing ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Sparkles width="15" height="15" />}
+                {isVoiceDeclAnalyzing ? 'Gemini đang phân tích…' : 'Phân tích AI & tự điền'}
+              </button>
+            </div>
+            {voiceDeclNotice && (
+              <div className={`mt-2.5 rounded-xl px-3.5 py-2.5 text-[11.5px] font-semibold border ${voiceDeclNotice.type === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : voiceDeclNotice.type === 'error' ? 'bg-rose-50 text-crimson border-rose-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                {voiceDeclNotice.text}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 pb-24">
@@ -3601,7 +3776,8 @@ function Popups({
   };
 
   const openFbEditor = () => {
-    if (!mgrUnlocked) { setFbPass(''); setFbGate(true); return; }
+    /* Nâng cấp: từ danh sách khách hàng -> Báo cáo nhanh -> Góp ý không hỏi lại mật khẩu */
+    setFbGate(false); setFbPass('');
     setFbText(fb ? fb.text : ''); setFbEditing(true);
   };
 
@@ -3814,24 +3990,9 @@ function Popups({
                   </div>
                 )}
 
-                {fbGate && !fbEditing && (
-                  <div className="mt-3 space-y-2">
-                    <p className="text-[11.5px] text-slate-500 font-semibold">Nhập mã bảo mật cấp quản lý để viết góp ý:</p>
-                    <input type="password" value={fbPass} autoFocus
-                      onChange={e => setFbPass(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && tryUnlockFb()}
-                      placeholder="Mã bảo mật..." className="fld" />
-                    <div className="grid grid-cols-2 gap-2">
-                      <button onClick={tryUnlockFb} className="btn py-3 bg-ink text-white text-[12.5px] uppercase tracking-wide">
-                        <I.Key width="15" height="15" /> Mở khóa
-                      </button>
-                      <button onClick={() => { setFbGate(false); setFbPass(''); }}
-                        className="btn py-3 bg-paper text-slate-500 text-[12.5px] uppercase tracking-wide">Hủy</button>
-                    </div>
-                  </div>
-                )}
+                {/* Mở góp ý trực tiếp, không hỏi lại mật khẩu trong Báo cáo nhanh */}
 
-                {!fbEditing && !fbGate && (
+                {!fbEditing && (
                   <button onClick={openFbEditor}
                     className="btn w-full py-3 mt-3 bg-crimson text-white text-[12.5px] uppercase tracking-wide shadow-lift">
                     <I.Edit width="15" height="15" /> {fb ? 'Sửa / Xóa góp ý' : 'Góp ý'}
