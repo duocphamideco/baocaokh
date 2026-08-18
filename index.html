@@ -769,17 +769,33 @@ function normalizeKnowledgeEntries(d) {
 async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   if (!customer) throw new Error('NO_CUSTOMER');
 
-  /* Luon doc kho kien thuc moi nhat tu Firebase tai thoi diem bam nut */
-  const kbRaw = await dbGet('settings/aiHandlingKnowledge');
-  const kb = normalizeKnowledgeEntries(kbRaw);
-  let knowledgeText = kb.map((x, i) => `\n[Tình huống nội bộ ${i+1}]\nTiêu đề: ${x.title}\nNội dung:\n${x.content}`).join('\n');
-  /* Tranh prompt qua lon; uu tien bai moi nhat */
-  if (knowledgeText.length > 60000) knowledgeText = knowledgeText.slice(0, 60000) + '\n[Đã lược bớt phần kho kiến thức quá dài]';
+  /*
+     V6.1 — ỔN ĐỊNH HUYỀN GỢI Ý
+     - Hồ sơ "Không thành công / khách không hợp tác" vẫn được phân tích bình thường.
+     - Turbo lỗi / timeout / JSON lỗi -> TỰ ĐỘNG rơi về Gemini 3.6 + 3 API dự phòng.
+     - Giới hạn prompt để tránh hồ sơ dài làm request bị ngắt giữa chừng.
+  */
+  const clipText = (v, max) => {
+    const t = String(v || '').trim();
+    return t.length > max ? t.slice(0, max) + '\n[Đã lược bớt phần quá dài, ưu tiên dữ liệu mới nhất]' : t;
+  };
 
-  const appts = (customer.appointments || []).map(a => ({
-    date: a.date || '', time: a.time || '', content: a.content || '', isCompleted: !!a.isCompleted
+  /* Luôn đọc kho kiến thức mới nhất; Firebase lỗi thì vẫn cho AI phân tích hồ sơ, không chặn toàn bộ. */
+  let kbRaw = null;
+  try { kbRaw = await dbGet('settings/aiHandlingKnowledge'); } catch (e) { kbRaw = null; }
+  const kb = normalizeKnowledgeEntries(kbRaw);
+  let knowledgeText = kb.map((x, i) => `\n[Tình huống nội bộ ${i+1}]\nTiêu đề: ${clipText(x.title, 250)}\nNội dung:\n${clipText(x.content, 6500)}`).join('\n');
+  if (knowledgeText.length > 32000) knowledgeText = knowledgeText.slice(0, 32000) + '\n[Đã lược bớt Kho kiến thức để kết nối ổn định]';
+
+  /* Chỉ lấy tối đa 20 lịch hẹn gần nhất để prompt không phình lớn. */
+  const appts = (Array.isArray(customer.appointments) ? customer.appointments : []).slice(-20).map(a => ({
+    date: a?.date || '', time: a?.time || '', content: clipText(a?.content, 800), isCompleted: !!a?.isCompleted
   }));
-  const savedAt = customer.updatedAt ? new Date(customer.updatedAt).toISOString() : '';
+  let savedAt = '';
+  try { savedAt = customer.updatedAt ? new Date(customer.updatedAt).toISOString() : ''; } catch (e) { savedAt = ''; }
+
+  const statusText = String(customer.status || '').trim();
+  const isNotSuccessful = /không thành công|không hợp tác|từ chối/i.test(statusText + ' ' + String(customer.customerFeedback || '') + ' ' + String(customer.report || ''));
 
   const prompt = `
 Bạn là CỐ VẤN KINH DOANH CẤP CAO của IDECO, chuyên hỗ trợ Ban Giám đốc và nhân viên kinh doanh xử lý khách hàng dược/nhà thuốc.
@@ -787,17 +803,21 @@ Bạn là CỐ VẤN KINH DOANH CẤP CAO của IDECO, chuyên hỗ trợ Ban Gi
 MỤC TIÊU:
 Phân tích HỒ SƠ ĐÃ LƯU MỚI NHẤT của khách hàng và đưa ra hướng xử lý thực tế, thông minh, có thứ tự ưu tiên. Khi có Kho kiến thức nội bộ IDECO phù hợp, phải ưu tiên vận dụng nội dung đó. Không được tự bịa giá, chiết khấu, chính sách, phản hồi khách hoặc cam kết của công ty.
 
+LƯU Ý ĐẶC BIỆT:
+- Trạng thái "Không thành công", "khách không hợp tác", "khách từ chối" KHÔNG phải lỗi dữ liệu. Đây là tình huống bán hàng hợp lệ cần được phân tích bình thường.
+- Nếu khách chưa hợp tác, hãy tìm nguyên nhân có căn cứ trong hồ sơ, đề xuất cách tái tiếp cận hoặc xác định khi nào nên tạm dừng; không ép bán và không tự suy diễn lý do.
+${isNotSuccessful ? '- Hồ sơ này có dấu hiệu khách chưa hợp tác/không thành công. Hãy ưu tiên phân tích nguyên nhân từ chối, khả năng tái kích hoạt, thời điểm theo dõi lại và điều kiện để quyết định nên tiếp tục hay tạm dừng.\n' : ''}
 HỒ SƠ KHÁCH HÀNG MỚI NHẤT:
-- Tên khách hàng: ${customer.name || ''}
-- Người liên hệ: ${customer.contactPerson || ''}
-- Điện thoại: ${customer.phone || ''}
-- Loại khách: ${customer.type || ''}
-- Địa chỉ: ${customer.address || ''} ${customer.province || ''}
-- Trạng thái giao dịch: ${customer.status || ''}
-- Ngày giao dịch: ${customer.transactionDate || ''}
+- Tên khách hàng: ${clipText(customer.name, 500)}
+- Người liên hệ: ${clipText(customer.contactPerson, 300)}
+- Điện thoại: ${clipText(customer.phone, 100)}
+- Loại khách: ${clipText(customer.type, 200)}
+- Địa chỉ: ${clipText((customer.address || '') + ' ' + (customer.province || ''), 1000)}
+- Trạng thái giao dịch: ${clipText(statusText, 300)}
+- Ngày giao dịch: ${clipText(customer.transactionDate, 100)}
 - Thời điểm lưu/cập nhật gần nhất: ${savedAt}
-- Nội dung báo cáo mới nhất:\n${customer.report || '(trống)'}
-- Khách hàng phản hồi:\n${customer.customerFeedback || '(trống)'}
+- Nội dung báo cáo mới nhất:\n${clipText(customer.report || '(trống)', 14000)}
+- Khách hàng phản hồi:\n${clipText(customer.customerFeedback || '(trống)', 7000)}
 - Lịch hẹn / bước tiếp theo:\n${JSON.stringify(appts)}
 
 KHO KIẾN THỨC XỬ LÝ TÌNH HUỐNG NỘI BỘ IDECO:
@@ -832,11 +852,54 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   "finalAdvice":"Kết luận hướng xử lý tốt nhất, ngắn gọn nhưng cụ thể"
 }`;
 
-  const raw = turbo
-    ? await callHuyenTurbo(prompt, { json: true })
-    : await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
-  const r = safeJson(raw, null);
+  let raw = '';
+  let turboFailed = false;
+  let turboError = null;
+
+  if (turbo) {
+    try {
+      raw = await callHuyenTurbo(prompt, { json: true });
+      /* Turbo đôi khi trả text nhưng JSON bị cắt. Xem như lỗi mềm và tự fallback. */
+      if (!safeJson(raw, null)) throw new Error('TURBO_BAD_JSON');
+    } catch (e) {
+      turboFailed = true;
+      turboError = e;
+      console.warn('[HUYEN TURBO] Kết nối/JSON lỗi, tự chuyển sang 3 API dự phòng:', e);
+      try {
+        window.__IDECO_HUYEN_TURBO_FALLBACK__ = { at: Date.now(), reason: String(e?.message || e) };
+      } catch (_) {}
+    }
+  }
+
+  /* Chế độ thường, hoặc Turbo vừa lỗi: tự chạy Gemini 3.6 với cơ chế API 01 -> 02 -> 03. */
+  if (!turbo || turboFailed) {
+    try {
+      raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
+    } catch (normalErr) {
+      const err = new Error('HUYEN_ALL_AI_FAILED');
+      err.turboError = turboError;
+      err.normalError = normalErr;
+      throw err;
+    }
+  }
+
+  let r = safeJson(raw, null);
+  if (!r) {
+    /* Một lần sửa JSON nhẹ bằng chế độ thường; không gọi Turbo lần nữa để tránh lặp lỗi. */
+    const repairPrompt = `Hãy chuyển nội dung sau thành đúng JSON theo cấu trúc yêu cầu, không thêm markdown, không bịa dữ liệu:\n${clipText(raw, 12000)}`;
+    try {
+      const repaired = await callGemini(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.05 });
+      r = safeJson(repaired, null);
+    } catch (e) {}
+  }
   if (!r) throw new Error('AI_BAD_JSON');
+
+  /* Gắn metadata nội bộ, giao diện cũ bỏ qua nếu không dùng. */
+  r._huyenMeta = {
+    turboRequested: !!turbo,
+    turboFallback: !!turboFailed,
+    analyzedAt: Date.now()
+  };
   return r;
 }
 
@@ -4314,8 +4377,8 @@ function Popups({
     } catch (e) {
       const msg = String(e && e.message || e);
       setAdvisorError(huyenTurbo
-        ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để dùng 3 API Gemini dự phòng.'
-        : (msg === 'NO_KEY' ? 'Chưa có Gemini API key. Vào Hệ thống → Cài đặt AI để nhập key.' : 'AI chưa phân tích được hồ sơ này. Kiểm tra kết nối hoặc API key rồi thử lại.'));
+        ? 'Huyền đã thử Turbo và tự chuyển qua các API dự phòng nhưng vẫn chưa kết nối được. Bạn vui lòng thử lại sau ít phút.'
+        : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : 'Huyền đã thử các API dự phòng nhưng chưa phân tích được hồ sơ này. Bạn thử lại sau ít phút.'));
     } finally { setAdvisorBusy(false); }
   };
 
@@ -4339,8 +4402,8 @@ function Popups({
         if (cancelled) return;
         const msg = String(e && e.message || e);
         setDirectAdvisorError(huyenTurbo
-          ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để quay về Gemini 3.6 Flash + 3 API dự phòng.'
-          : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
+          ? 'Huyền đã thử Turbo và tự chuyển qua API dự phòng nhưng vẫn chưa kết nối được. Bạn thử lại sau ít phút.'
+          : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : 'Huyền đã thử các API dự phòng nhưng chưa phân tích được hồ sơ này. Bạn thử lại sau ít phút.'));
       } finally { if (!cancelled) setDirectAdvisorBusy(false); }
     };
     run();
@@ -4356,7 +4419,7 @@ function Popups({
     } catch (e) {
       const msg = String(e && e.message || e);
       setDirectAdvisorError(huyenTurbo
-        ? 'Huyền Turbo chưa kết nối được Gemini 3.7 Flash trên Kie.ai. Bạn thử lại hoặc tắt Turbo để quay về Gemini 3.6 Flash + 3 API dự phòng.'
+        ? 'Huyền Turbo chưa kết nối được Kie.ai Turbo 3.7 Flash. Huyền sẽ tự chuyển sang chế độ thường và các API dự phòng; bạn cũng có thể thử lại sau.'
         : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
     } finally { setDirectAdvisorBusy(false); }
   };
@@ -4572,7 +4635,7 @@ function Popups({
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${huyenTurbo ? 'bg-amber2 text-white shadow-lift' : 'bg-paper text-slate-400'}`}>⚡</div>
                 <div className="min-w-0 mr-auto">
                   <p className="font-display text-[13.5px] font-extrabold text-ink">Huyền Turbo</p>
-                  <p className="text-[10.5px] text-slate-500 mt-0.5">{huyenTurbo ? 'BẬT · Gemini 3.7 Flash · Kie.ai · suy luận cao' : 'TẮT · đang dùng Gemini 3.6 Flash + API dự phòng'}</p>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">{huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng'}</p>
                 </div>
                 <button onClick={toggleHuyenTurbo} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'}`} aria-label="Bật hoặc tắt Huyền Turbo">
                   <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow transition-all ${huyenTurbo ? 'left-8' : 'left-1'}`}></span>
@@ -4601,7 +4664,7 @@ function Popups({
               <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-center fade-in">
                 <I.Loader width="22" height="22" className="animate-spin text-amber2 mx-auto" />
                 <p className="font-display text-[15px] font-extrabold text-ink mt-3">Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý...</p>
-                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang dùng Gemini 3.7 Flash trên Kie.ai với suy luận cao và đối chiếu Kho kiến thức nội bộ.' : 'Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.'}</p>
+                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang dùng Kie.ai Turbo 3.7 Flash với suy luận cao và đối chiếu Kho kiến thức nội bộ.' : 'Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.'}</p>
               </div>
             )}
 
@@ -4814,7 +4877,7 @@ function Popups({
                   </div>
                 </div>
                 <button onClick={toggleHuyenTurbo} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'}`}>
-                  ⚡ Huyền Turbo: {huyenTurbo ? 'BẬT · Gemini 3.7 Flash' : 'TẮT'}
+                  ⚡ Huyền Turbo: {huyenTurbo ? 'BẬT · Turbo 3.7 Flash' : 'TẮT'}
                 </button>
                 {turboNotice && huyenTurbo && <div className="mb-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-[10.8px] font-semibold text-amber-800 leading-relaxed">Huyền đang ráng hết sức để phản hồi bạn nhé — tuy nhiên nhấn nút này Huyền hơi bị mệt tí, tốn tiền tí nhưng sẽ áp dụng nhé.</div>}
                 <button onClick={runAdvisor} disabled={advisorBusy || !quickReportCustomer.report}
