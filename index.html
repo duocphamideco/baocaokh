@@ -794,6 +794,36 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   let savedAt = '';
   try { savedAt = customer.updatedAt ? new Date(customer.updatedAt).toISOString() : ''; } catch (e) { savedAt = ''; }
 
+  /* Phân tích vòng đời giao dịch từ ngày bắt đầu tới lần cập nhật/lịch hẹn mới nhất. */
+  const today = new Date();
+  const parseLocalDate = (v, time = '12:00') => {
+    if (!v) return null;
+    const d = new Date(`${v}T${time || '12:00'}:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  const startDateObj = parseLocalDate(customer.transactionDate);
+  const appointmentTimeline = appts.map(a => ({ ...a, _d: parseLocalDate(a.date, a.time || '12:00') })).filter(a => a._d);
+  appointmentTimeline.sort((a,b) => a._d - b._d);
+  const latestAppointment = appointmentTimeline.length ? appointmentTimeline[appointmentTimeline.length - 1] : null;
+  const latestCompletedAppointment = [...appointmentTimeline].reverse().find(a => a.isCompleted) || null;
+  const latestOpenAppointment = [...appointmentTimeline].reverse().find(a => !a.isCompleted) || null;
+  const updatedObj = customer.updatedAt ? new Date(customer.updatedAt) : null;
+  const validUpdatedObj = updatedObj && !Number.isNaN(updatedObj.getTime()) ? updatedObj : null;
+  const latestTouchObj = [validUpdatedObj, latestAppointment?._d, startDateObj].filter(Boolean).sort((a,b) => b-a)[0] || today;
+  const daysFromStart = startDateObj ? Math.max(0, Math.floor((today - startDateObj) / 86400000)) : null;
+  const daysSinceLatestTouch = latestTouchObj ? Math.max(0, Math.floor((today - latestTouchObj) / 86400000)) : null;
+  const latestOpenIsOverdue = !!(latestOpenAppointment && latestOpenAppointment._d < today);
+  const timelineSummary = {
+    today: getLocalDateString(today),
+    startDate: customer.transactionDate || '',
+    daysFromStart,
+    lastSavedAt: savedAt,
+    daysSinceLatestTouch,
+    latestAppointment: latestAppointment ? { date: latestAppointment.date, time: latestAppointment.time, content: latestAppointment.content, isCompleted: latestAppointment.isCompleted } : null,
+    latestCompletedAppointment: latestCompletedAppointment ? { date: latestCompletedAppointment.date, time: latestCompletedAppointment.time, content: latestCompletedAppointment.content } : null,
+    latestOpenAppointment: latestOpenAppointment ? { date: latestOpenAppointment.date, time: latestOpenAppointment.time, content: latestOpenAppointment.content, overdue: latestOpenIsOverdue } : null
+  };
+
   const statusText = String(customer.status || '').trim();
   const isNotSuccessful = /không thành công|không hợp tác|từ chối/i.test(statusText + ' ' + String(customer.customerFeedback || '') + ' ' + String(customer.report || ''));
 
@@ -833,6 +863,10 @@ NGUYÊN TẮC PHÂN TÍCH:
 7. Nếu cần Ban Giám đốc hỗ trợ, nói rõ cần duyệt/quyết định/chuẩn bị nội dung gì; nếu chưa cần thì ghi rõ chưa cần.
 8. Nếu dùng kiến thức nội bộ, liệt kê đúng TIÊU ĐỀ đã tham chiếu. Không nói đã dùng nếu không thực sự phù hợp.
 9. Tránh lời khuyên chung chung kiểu “chăm sóc tốt hơn”; phải chỉ rõ nên làm gì tiếp theo.
+10. BẮT BUỘC phân tích yếu tố thời gian: từ ngày bắt đầu giao dịch đến hôm nay, lần lưu gần nhất, lịch hẹn gần nhất, lịch hẹn đang mở và việc có bị trễ hẹn hay không. Dựa vào đó đánh giá nhịp chăm sóc có quá lâu/quá dày hay hợp lý.
+11. BẮT BUỘC kết luận rõ một trong các hướng: tiếp tục trao đổi ngay; tiếp tục nhưng đổi cách tiếp cận; chờ đến lịch hẹn đã chốt; tạm dừng và tái kích hoạt sau; hoặc cần trao đổi với Chú Triết/BGĐ ngay.
+12. Nếu tình huống liên quan chính sách ngoài thẩm quyền, khách lớn/chuỗi, yêu cầu giá/chiết khấu/công nợ/đổi trả đặc biệt, có nguy cơ mất khách, kéo dài nhiều vòng không tiến triển, hoặc kiến thức nội bộ yêu cầu báo cấp trên -> đề nghị "Trao đổi với Chú Triết ngay" và nói rõ cần xin ý kiến điều gì.
+13. Nếu chưa cần trao đổi với Chú Triết, ghi rõ vì sao nhân viên có thể tự xử lý ở bước tiếp theo.
 
 TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 {
@@ -848,6 +882,9 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   "missingInfo":["Thông tin còn thiếu cần khai thác"],
   "managementSupport":"Nội dung BGĐ nên hỗ trợ/duyệt hoặc 'Chưa cần hỗ trợ đặc biệt'",
   "nextFollowUp":"Đề xuất thời điểm/cách theo dõi tiếp; nếu hồ sơ không đủ dữ liệu thời gian thì nói cần chốt lịch cụ thể",
+  "timelineAssessment":"Đánh giá thời gian từ lúc bắt đầu giao dịch tới cập nhật/lịch hẹn mới nhất và ý nghĩa đối với cách chăm sóc",
+  "relationshipDecision":"Tiếp tục trao đổi ngay|Tiếp tục nhưng đổi cách tiếp cận|Chờ đến lịch hẹn đã chốt|Tạm dừng và tái kích hoạt sau|Trao đổi với Chú Triết ngay",
+  "talkToTriet":{"needed":true,"reason":"Vì sao cần/không cần trao đổi với Chú Triết","ask":"Nếu cần, nội dung cụ thể cần xin ý kiến/duyệt; nếu không cần để trống"},
   "knowledgeUsed":["Đúng tiêu đề kiến thức nội bộ đã sử dụng"],
   "finalAdvice":"Kết luận hướng xử lý tốt nhất, ngắn gọn nhưng cụ thể"
 }`;
@@ -1338,6 +1375,8 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
+  /* BGĐ kiểm soát quyền dùng Huyền Turbo / credit qua Firebase */
+  const [turboControl, setTurboControl] = useState({ allowed: true, defaultOn: false, locked: false });
 
   /* ---------- ui flow ---------- */
   const [view, setView] = useState('main');
@@ -1495,7 +1534,15 @@ function App() {
       };
       apply();
     });
-    return () => { offStaff(); offCust(); offPass(); offKey(); };
+    const offTurboControl = dbOnValue('settings/huyenTurboControl', (v) => {
+      const next = {
+        allowed: v && typeof v.allowed === 'boolean' ? v.allowed : true,
+        defaultOn: v && typeof v.defaultOn === 'boolean' ? v.defaultOn : false,
+        locked: v && typeof v.locked === 'boolean' ? v.locked : false
+      };
+      setTurboControl(next);
+    });
+    return () => { offStaff(); offCust(); offPass(); offKey(); offTurboControl(); };
   }, []);
 
   /* Danh sach khach hang tu Excel: luu tren Firebase de moi may deu dung chung */
@@ -1940,6 +1987,20 @@ function App() {
     GEMINI_ACTIVE_KEY_INDEX = 0; GEMINI_KEY_COOLDOWN.clear();
     const count = vals.filter(Boolean).length;
     notify(count ? `Đã lưu ${count} API Gemini dự phòng — hệ thống sẽ tự chuyển khi key lỗi/hết quota` : 'Đã xóa các API key dự phòng', 'success');
+  };
+
+  const handleSaveTurboControl = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const allowed = !!document.getElementById('turboAllowedInput')?.checked;
+    const defaultOn = !!document.getElementById('turboDefaultOnInput')?.checked;
+    const locked = !!document.getElementById('turboLockedInput')?.checked;
+    const payload = { allowed, defaultOn: allowed ? defaultOn : false, locked, updatedAt: Date.now() };
+    const ok = await dbSet('settings/huyenTurboControl', payload);
+    if (!ok) { notify('Không lưu được thiết lập Huyền Turbo', 'error'); return; }
+    setTurboControl(payload);
+    notify(locked
+      ? `Đã khóa Huyền Turbo theo thiết lập BGĐ: ${payload.defaultOn ? 'BẬT' : 'TẮT'}`
+      : `Đã lưu quyền Huyền Turbo: ${allowed ? 'cho phép nhân viên bật/tắt' : 'không cho phép sử dụng'}`, 'success', 4800);
   };
 
   const handleConfirmAlert = async () => {
@@ -3022,6 +3083,7 @@ function App() {
         targetWarning={targetWarning} setTargetWarning={setTargetWarning}
         quickReportCustomer={liveQuickReport} setQuickReportCustomer={setQuickReportCustomer}
         advisorCustomer={liveAdvisorCustomer} setAdvisorCustomer={setAdvisorCustomer}
+        turboControl={turboControl}
         mgrUnlocked={mgrUnlocked} setMgrUnlocked={setMgrUnlocked}
         onSaveFeedback={handleSaveFeedback} onDeleteFeedback={handleDeleteFeedback}
         notify={notify}
@@ -4060,6 +4122,46 @@ function App() {
                   </div>
                 </section>
 
+                {/* HUYỀN TURBO — kiểm soát credit từ Cài đặt */}
+                <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber2 flex items-center justify-center text-lg">⚡</div>
+                    <div>
+                      <h3 className="font-display text-[17px] font-extrabold text-ink">Kiểm soát Huyền Turbo</h3>
+                      <p className="text-[11px] text-slate-400 font-semibold">Kie.ai · Turbo 3.7 Flash · kiểm soát credit</p>
+                    </div>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
+                    Ban Giám đốc có thể cho phép/tắt Turbo, chọn trạng thái mặc định và khóa nút bên ngoài. Khi khóa, nhân viên không thể tự thay đổi trạng thái Turbo.
+                  </p>
+                  <div className="space-y-3">
+                    <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-ink">Cho phép sử dụng Huyền Turbo</span>
+                        <span className="block text-[10.5px] text-slate-400 mt-0.5">Tắt mục này để chặn hoàn toàn việc dùng credit Turbo.</span>
+                      </span>
+                      <input id="turboAllowedInput" type="checkbox" defaultChecked={turboControl.allowed} className="w-5 h-5 accent-amber-500" />
+                    </label>
+                    <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-ink">Trạng thái Turbo mặc định</span>
+                        <span className="block text-[10.5px] text-slate-400 mt-0.5">Bật nếu muốn Huyền Turbo được dùng mặc định khi mở bảng phân tích.</span>
+                      </span>
+                      <input id="turboDefaultOnInput" type="checkbox" defaultChecked={turboControl.defaultOn} className="w-5 h-5 accent-amber-500" />
+                    </label>
+                    <label className="flex items-center justify-between gap-3 bg-rose-50/60 border border-rose-100 rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-crimson">Khóa nút Turbo ngoài giao diện</span>
+                        <span className="block text-[10.5px] text-slate-500 mt-0.5">Khi khóa, nút bên ngoài chỉ hiển thị trạng thái BGĐ đã đặt, nhân viên không thể bật/tắt.</span>
+                      </span>
+                      <input id="turboLockedInput" type="checkbox" defaultChecked={turboControl.locked} className="w-5 h-5 accent-rose-500" />
+                    </label>
+                    <button onClick={handleSaveTurboControl} className="btn w-full py-3.5 bg-amber2 text-white text-[13px] uppercase tracking-wider shadow-lift">
+                      <I.Save width="16" height="16" /> Lưu kiểm soát Huyền Turbo
+                    </button>
+                  </div>
+                </section>
+
                 <KnowledgeBaseSettings notify={notify} />
               </React.Fragment>
             )}
@@ -4320,6 +4422,7 @@ function Popups({
   targetWarning, setTargetWarning,
   quickReportCustomer, setQuickReportCustomer,
   advisorCustomer, setAdvisorCustomer,
+  turboControl,
   mgrUnlocked, setMgrUnlocked,
   onSaveFeedback, onDeleteFeedback, notify
 }) {
@@ -4344,14 +4447,36 @@ function Popups({
   const [advisorResult, setAdvisorResult] = useState(null);
   const [advisorError, setAdvisorError] = useState('');
 
-  /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng. */
+  /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng; quyền dùng do BGĐ kiểm soát trong Cài đặt. */
+  const turboPolicy = turboControl || { allowed: true, defaultOn: false, locked: false };
   const [huyenTurbo, setHuyenTurbo] = useState(() => {
     try { return sessionStorage.getItem('ideco_huyen_turbo') === '1'; } catch (e) { return false; }
   });
   const [turboNotice, setTurboNotice] = useState(false);
   const turboNoticeTimerRef = useRef(null);
 
+  /* Đồng bộ quyền: bị chặn -> luôn tắt; bị khóa -> luôn theo trạng thái BGĐ; chưa khóa -> người dùng được tự chọn. */
+  useEffect(() => {
+    if (!turboPolicy.allowed) {
+      setHuyenTurbo(false);
+      try { sessionStorage.setItem('ideco_huyen_turbo', '0'); } catch (e) {}
+      return;
+    }
+    if (turboPolicy.locked) {
+      setHuyenTurbo(!!turboPolicy.defaultOn);
+      try { sessionStorage.setItem('ideco_huyen_turbo', turboPolicy.defaultOn ? '1' : '0'); } catch (e) {}
+    }
+  }, [turboPolicy.allowed, turboPolicy.defaultOn, turboPolicy.locked]);
+
   const toggleHuyenTurbo = () => {
+    if (!turboPolicy.allowed) {
+      notify && notify('Huyền Turbo đang được BGĐ tắt trong Cài đặt để kiểm soát credit.', 'warning', 4600);
+      return;
+    }
+    if (turboPolicy.locked) {
+      notify && notify(`Huyền Turbo đang bị khóa theo thiết lập BGĐ: ${turboPolicy.defaultOn ? 'BẬT' : 'TẮT'}.`, 'warning', 4600);
+      return;
+    }
     setHuyenTurbo(prev => {
       const next = !prev;
       try { sessionStorage.setItem('ideco_huyen_turbo', next ? '1' : '0'); } catch (e) {}
@@ -4635,9 +4760,9 @@ function Popups({
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${huyenTurbo ? 'bg-amber2 text-white shadow-lift' : 'bg-paper text-slate-400'}`}>⚡</div>
                 <div className="min-w-0 mr-auto">
                   <p className="font-display text-[13.5px] font-extrabold text-ink">Huyền Turbo</p>
-                  <p className="text-[10.5px] text-slate-500 mt-0.5">{huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng'}</p>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">{!turboPolicy.allowed ? 'TẮT bởi BGĐ · kiểm soát credit' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · BGĐ đã khóa trạng thái` : (huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng')}</p>
                 </div>
-                <button onClick={toggleHuyenTurbo} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'}`} aria-label="Bật hoặc tắt Huyền Turbo">
+                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`} aria-label="Bật hoặc tắt Huyền Turbo">
                   <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow transition-all ${huyenTurbo ? 'left-8' : 'left-1'}`}></span>
                 </button>
               </div>
@@ -4735,6 +4860,22 @@ function Popups({
                   <div className="spine bg-white border border-line rounded-xl p-3.5 pl-5" style={{ '--spine':'#1d6fd0' }}>
                     <p className="lbl mb-1">Theo dõi tiếp theo</p>
                     <p className="text-[12px] text-ink leading-relaxed">{directAdvisorResult.nextFollowUp}</p>
+                  </div>
+                )}
+
+                {directAdvisorResult.timelineAssessment && (
+                  <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-1">Đánh giá thời gian giao dịch</p>
+                    <p className="text-[11.8px] text-slate-600 leading-relaxed">{directAdvisorResult.timelineAssessment}</p>
+                  </div>
+                )}
+
+                {directAdvisorResult.relationshipDecision && (
+                  <div className={`rounded-xl border p-3.5 ${String(directAdvisorResult.relationshipDecision).includes('Chú Triết') ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-slate-500 mb-1">Đề nghị bước tiếp theo</p>
+                    <p className="text-[13px] font-extrabold text-ink leading-relaxed">{directAdvisorResult.relationshipDecision}</p>
+                    {directAdvisorResult.talkToTriet?.reason && <p className="text-[11.5px] text-slate-600 mt-1.5 leading-relaxed">{directAdvisorResult.talkToTriet.reason}</p>}
+                    {directAdvisorResult.talkToTriet?.needed && directAdvisorResult.talkToTriet?.ask && <p className="text-[11.5px] font-bold text-crimson mt-1.5 leading-relaxed">Cần trao đổi Chú Triết: {directAdvisorResult.talkToTriet.ask}</p>}
                   </div>
                 )}
 
@@ -4876,8 +5017,8 @@ function Popups({
                     <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Phân tích bản lưu mới nhất và đối chiếu Kho kiến thức nội bộ trong Cài đặt.</p>
                   </div>
                 </div>
-                <button onClick={toggleHuyenTurbo} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'}`}>
-                  ⚡ Huyền Turbo: {huyenTurbo ? 'BẬT · Turbo 3.7 Flash' : 'TẮT'}
+                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                  ⚡ Huyền Turbo: {!turboPolicy.allowed ? 'BGĐ ĐÃ TẮT' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · ĐÃ KHÓA` : (huyenTurbo ? 'BẬT · Turbo 3.7 Flash' : 'TẮT')}
                 </button>
                 {turboNotice && huyenTurbo && <div className="mb-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-[10.8px] font-semibold text-amber-800 leading-relaxed">Huyền đang ráng hết sức để phản hồi bạn nhé — tuy nhiên nhấn nút này Huyền hơi bị mệt tí, tốn tiền tí nhưng sẽ áp dụng nhé.</div>}
                 <button onClick={runAdvisor} disabled={advisorBusy || !quickReportCustomer.report}
@@ -4938,6 +5079,17 @@ function Popups({
                     )}
                     {advisorResult.nextFollowUp && (
                       <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5 text-[11.5px] text-slate-600 leading-relaxed"><b className="text-brand">Theo dõi tiếp:</b> {advisorResult.nextFollowUp}</div>
+                    )}
+                    {advisorResult.timelineAssessment && (
+                      <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5 text-[11.5px] text-slate-600 leading-relaxed"><b className="text-brand">Đánh giá thời gian giao dịch:</b> {advisorResult.timelineAssessment}</div>
+                    )}
+                    {advisorResult.relationshipDecision && (
+                      <div className={`rounded-xl border p-3.5 ${String(advisorResult.relationshipDecision).includes('Chú Triết') ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-slate-500 mb-1">Đề nghị bước tiếp theo</p>
+                        <p className="text-[12.5px] font-extrabold text-ink leading-relaxed">{advisorResult.relationshipDecision}</p>
+                        {advisorResult.talkToTriet?.reason && <p className="text-[11.5px] text-slate-600 mt-1.5 leading-relaxed">{advisorResult.talkToTriet.reason}</p>}
+                        {advisorResult.talkToTriet?.needed && advisorResult.talkToTriet?.ask && <p className="text-[11.5px] font-bold text-crimson mt-1.5 leading-relaxed">Cần trao đổi Chú Triết: {advisorResult.talkToTriet.ask}</p>}
+                      </div>
                     )}
                     {Array.isArray(advisorResult.knowledgeUsed) && advisorResult.knowledgeUsed.length > 0 && (
                       <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {advisorResult.knowledgeUsed.join(' · ')}</div>
