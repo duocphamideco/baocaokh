@@ -107,6 +107,13 @@ tailwind.config = {
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+</script>
 <!-- Firebase SDK (WebSocket) — dung cung dong v12 nhu ban goc chay tot tren AI Studio -->
 <script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-database-compat.js"></script>
@@ -440,12 +447,17 @@ function safeJson(txt, fallback) {
 }
 
 /** Nhiệm vụ 1: chỉnh sửa văn bản — Nhiệm vụ 2: lời khuyên từ IDECO (giữ nguyên prompt gốc) */
-async function analyzeAndRefineReport(text) {
+async function analyzeAndRefineReport(text, customerFeedback = '') {
   if (!text || !text.trim()) return { status: 'warning', text, message: 'Nội dung trống' };
   const prompt = `
     Bạn là một chuyên gia tư vấn bán hàng và quản lý kinh doanh của công ty IDECO.
-    Nhiệm vụ: Xử lý văn bản báo cáo thăm viếng khách hàng dưới đây:
+    Nhiệm vụ: Xử lý báo cáo giao dịch khách hàng dưới đây.
+
+    NỘI DUNG BÁO CÁO:
     "${text}"
+
+    PHẢN HỒI KHÁCH HÀNG ĐÃ KHAI (nếu có):
+    "${customerFeedback || ''}"
 
     Hãy thực hiện 2 nhiệm vụ sau và trả về định dạng JSON:
 
@@ -457,19 +469,25 @@ async function analyzeAndRefineReport(text) {
     NHIỆM VỤ 2: ĐƯA RA LỜI KHUYÊN TỪ IDECO (advice)
     Hãy phân tích nội dung và đưa ra lời khuyên dựa trên các quy tắc sau (Hãy gộp các lời khuyên thành một đoạn văn mạch lạc, chân thành):
 
-    1. Kiểm tra Tên Sản Phẩm:
-       - Nếu nội dung KHÔNG có tên sản phẩm hoặc nhóm sản phẩm cụ thể -> Thêm lời khuyên: "Bạn nên nêu cụ thể tên sản phẩm hay nhóm sản phẩm cụ thể hơn để thuyết phục khách hàng."
+    1. Kiểm tra Sản phẩm / Danh mục chào bán:
+       - Nếu báo cáo KHÔNG có tên sản phẩm, thuốc, nhãn hàng hoặc nhóm/danh mục sản phẩm cụ thể đã chào khách -> nhắc rõ: "Bạn nên bổ sung cụ thể sản phẩm/danh mục đã chào mới cho khách hàng để Ban Giám đốc biết chính xác mình đang triển khai mặt hàng nào."
 
-    2. Kiểm tra Phản Hồi Khách Hàng:
-       - Nếu nội dung KHÔNG nêu phản hồi của khách -> Thêm lời khuyên: "Bạn nên khai báo phản hồi khách hàng để cùng theo dõi tình huống tốt hơn."
+    2. Kiểm tra Chính sách bán hàng đã trao đổi:
+       - Nếu KHÔNG thấy chính sách bán hàng cụ thể đã áp dụng/đề xuất như giá, chiết khấu, chương trình, công nợ, đổi trả, hỗ trợ trưng bày, thưởng doanh số hoặc điều kiện đặt hàng -> nhắc: "Bạn nên nêu chính sách bán hàng đã trao đổi hoặc lý do chưa thể báo chính sách để Ban Giám đốc có cơ sở hỗ trợ xử lý."
 
-    3. Xử lý Từ Khóa Về Giá (giá cao, chiết khấu thấp, giá đắt, giá bán cao, chiết khấu không cao):
+    3. Kiểm tra Phản hồi Khách Hàng:
+       - Xem cả NỘI DUNG BÁO CÁO và PHẢN HỒI KHÁCH HÀNG ĐÃ KHAI. Nếu cả hai KHÔNG nêu phản hồi thực tế của khách -> nhắc: "Bạn nên khai báo phản hồi cụ thể của khách hàng: đồng ý/từ chối/quan tâm sản phẩm nào, vướng giá hay chính sách gì, cần xem thêm điều gì."
+
+    4. Xử lý Từ Khóa Về Giá (giá cao, chiết khấu thấp, giá đắt, giá bán cao, chiết khấu không cao):
        - Nếu xuất hiện -> Thêm lời khuyên: "Hãy phân tích rõ cho khách hàng giá mua vào, hãy thêm yếu tố đổi trả tốt hơn, thậm chí bàn lại công nợ hỗ trợ hay đề nghị nhóm sản phẩm giá phù hợp, đồng thời hỏi khách hàng so sánh giá với sản phẩm nào cụ thể cùng quy cách, cùng tác dụng."
 
-    4. Xử lý Từ Khóa Trì Hoãn (để xem xét, trả lời sau, để hỏi lại, xem sau):
+    5. Xử lý Từ Khóa Trì Hoãn (để xem xét, trả lời sau, để hỏi lại, xem sau):
        - Nếu xuất hiện -> Thêm lời khuyên: "Nên hỏi rõ thời điểm phản hồi từ khách hàng và chủ động thiết lập cuộc hẹn."
 
-    5. Lời khuyên mặc định (LUÔN LUÔN THÊM VÀO CUỐI):
+    6. Kiểm tra bước tiếp theo:
+       - Nếu chưa có hành động tiếp theo/hẹn phản hồi/gửi báo giá/gọi lại/chốt thời điểm theo dõi -> nhắc nhân viên nêu rõ bước tiếp theo và thời điểm dự kiến.
+
+    7. Lời khuyên mặc định (LUÔN LUÔN THÊM VÀO CUỐI):
        - "Bạn nên chủ động hỏi lý do từ chối, hay xem xét và chủ động gợi ý thêm nhiều sản phẩm khác, dò hỏi nhu cầu tiềm ẩn của khách hàng và luôn chủ động xin cuộc hẹn."
 
     Output định dạng JSON chuẩn (không dùng markdown block):
@@ -494,20 +512,29 @@ async function analyzeAndRefineReport(text) {
 async function analyzeVoiceCustomerDeclaration(text) {
   const empty = {
     name: '', contactPerson: '', phone: '', address: '', province: '', type: '',
-    report: '', missing: [], summary: ''
+    report: '', customerFeedback: '', missing: [], summary: '', qualityIssues: [], qualityAdvice: ''
   };
   if (!text || !text.trim()) return { ...empty, missing: ['Nội dung khai báo'] };
   const prompt = `
-Bạn là trợ lý nhập liệu CRM của IDECO. Hãy đọc nội dung khai báo bằng giọng nói/văn bản của nhân viên kinh doanh và TRÍCH XUẤT thông tin.
+Bạn là trợ lý CRM và trợ lý phân tích báo cáo kinh doanh của IDECO. Hãy đọc nội dung khai báo bằng giọng nói/văn bản của nhân viên kinh doanh, sau đó thực hiện HAI nhiệm vụ: TRÍCH XUẤT DỮ LIỆU và KIỂM TRA CHẤT LƯỢNG BÁO CÁO.
 
 NGUYÊN TẮC BẮT BUỘC:
 - Chỉ lấy dữ liệu thật sự xuất hiện hoặc được nói rõ trong văn bản. KHÔNG tự bịa, KHÔNG tự tra cứu bên ngoài.
 - Giữ nguyên tên doanh nghiệp/nhà thuốc, tên người liên hệ, số điện thoại, địa chỉ nếu có.
 - "type" chỉ được chọn đúng MỘT trong: "Nhà Thuốc", "Công Ty Dược", "Đại Lý Mỹ Phẩm", "Chuỗi Nhà Thuốc", "Khác". Nếu không đủ căn cứ thì để trống.
 - "province" chỉ điền tỉnh/thành phố nếu xác định được trực tiếp từ địa chỉ được khai báo.
-- "report" là phần nội dung đã trao đổi/cập nhật với khách hàng; viết rõ ràng, chuyên nghiệp nhưng KHÔNG thêm sự kiện mới. Không lặp lại thông tin định danh nếu không cần thiết.
-- "missing" phải liệt kê các mục còn thiếu trong 6 nhóm bắt buộc: Tên doanh nghiệp/khách hàng, Người liên hệ, Số điện thoại, Địa chỉ, Đối tượng khách hàng, Nội dung trao đổi/cập nhật.
-- Nếu văn bản có nội dung nhưng chưa đủ để xác định một trường, trường đó để chuỗi rỗng và đưa tên trường vào "missing".
+- "customerFeedback" CHỈ chứa phản hồi thực tế của khách hàng: khách nói gì, đồng ý/từ chối gì, quan tâm sản phẩm nào, chê/khen giá/chính sách, cần xem xét gì, yêu cầu gì, dự kiến mua hay chưa mua. Nếu không có phản hồi thì để trống. KHÔNG biến lời của nhân viên thành phản hồi của khách.
+- "report" là phần nội dung giao dịch/trao đổi/cập nhật còn lại: đã giới thiệu/chào gì, trao đổi chính sách gì, vướng mắc, việc đã làm và bước tiếp theo. Viết rõ ràng, chuyên nghiệp nhưng KHÔNG thêm sự kiện mới.
+- Nếu cùng một câu vừa chứa hành động của nhân viên vừa có phản hồi khách, có thể tách hợp lý: phần nhân viên làm vào "report", phần khách trả lời vào "customerFeedback".
+- "missing" phải liệt kê các mục còn thiếu trong 6 nhóm nhận diện bắt buộc: Tên doanh nghiệp/khách hàng, Người liên hệ, Số điện thoại, Địa chỉ, Đối tượng khách hàng, Nội dung trao đổi/cập nhật.
+
+KIỂM TRA CHẤT LƯỢNG BÁO CÁO — điền vào "qualityIssues":
+1. Nếu không nêu sản phẩm/thuốc/nhãn hàng/danh mục/nhóm sản phẩm cụ thể đã chào hoặc trao đổi -> thêm "Chưa nêu sản phẩm/danh mục cụ thể đã chào khách hàng".
+2. Nếu không nêu chính sách bán hàng đã trao đổi/áp dụng (ví dụ giá, chiết khấu, chương trình, công nợ, đổi trả, hỗ trợ, thưởng doanh số, điều kiện đơn hàng), VÀ cũng không nói rõ là chưa báo/chưa có chính sách -> thêm "Chưa nêu chính sách bán hàng đã trao đổi hoặc lý do chưa áp dụng".
+3. Nếu không có phản hồi thực tế của khách -> thêm "Chưa nêu phản hồi cụ thể của khách hàng".
+4. Nếu không có bước xử lý tiếp theo/hẹn gọi lại/gửi báo giá/gửi danh mục/chốt thời gian phản hồi -> thêm "Chưa nêu bước xử lý tiếp theo hoặc thời điểm theo dõi".
+5. Nếu nội dung mơ hồ, quá chung chung, không đủ để Ban Giám đốc hiểu tình huống và hỗ trợ ra quyết định -> thêm "Nội dung còn chung chung, cần nêu rõ tình huống/vướng mắc cần hỗ trợ".
+- "qualityAdvice" là một đoạn nhắc ngắn gọn, thân thiện, ưu tiên đúng các qualityIssues đã phát hiện; mục tiêu là giúp nhân viên bổ sung báo cáo để Ban Giám đốc dễ hiểu tình huống và hỗ trợ xử lý. KHÔNG tự điền chính sách hay sản phẩm mà nhân viên chưa khai.
 
 VĂN BẢN KHAI BÁO:
 ${text}
@@ -521,8 +548,11 @@ Chỉ trả về JSON chuẩn theo cấu trúc:
   "province":"",
   "type":"",
   "report":"",
+  "customerFeedback":"",
   "missing":[],
-  "summary":""
+  "summary":"",
+  "qualityIssues":[],
+  "qualityAdvice":""
 }`;
   try {
     const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.1 });
@@ -536,8 +566,11 @@ Chỉ trả về JSON chuẩn theo cấu trúc:
       province: String(r.province || '').trim(),
       type: String(r.type || '').trim(),
       report: String(r.report || '').trim(),
+      customerFeedback: String(r.customerFeedback || '').trim(),
       missing: Array.isArray(r.missing) ? r.missing.filter(Boolean).map(String) : [],
-      summary: String(r.summary || '').trim()
+      summary: String(r.summary || '').trim(),
+      qualityIssues: Array.isArray(r.qualityIssues) ? r.qualityIssues.filter(Boolean).map(String) : [],
+      qualityAdvice: String(r.qualityAdvice || '').trim()
     };
   } catch (e) {
     if (e && e.message === 'NO_KEY') throw e;
@@ -585,6 +618,119 @@ async function searchSingleCustomerPhone(companyName) {
     });
     return safeJson(raw, empty);
   } catch (e) { return empty; }
+}
+
+
+/* ---------------- AI CO VAN XU LY KHACH HANG + KHO KIEN THUC NOI BO ---------------- */
+function normalizeKnowledgeEntries(d) {
+  if (!d) return [];
+  const arr = Array.isArray(d) ? d : Object.values(d);
+  return arr.filter(x => x && x.title && x.content)
+    .sort((a,b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+}
+
+async function analyzeLatestCustomerStrategy(customer) {
+  if (!customer) throw new Error('NO_CUSTOMER');
+
+  /* Luon doc kho kien thuc moi nhat tu Firebase tai thoi diem bam nut */
+  const kbRaw = await dbGet('settings/aiHandlingKnowledge');
+  const kb = normalizeKnowledgeEntries(kbRaw);
+  let knowledgeText = kb.map((x, i) => `\n[Tình huống nội bộ ${i+1}]\nTiêu đề: ${x.title}\nNội dung:\n${x.content}`).join('\n');
+  /* Tranh prompt qua lon; uu tien bai moi nhat */
+  if (knowledgeText.length > 60000) knowledgeText = knowledgeText.slice(0, 60000) + '\n[Đã lược bớt phần kho kiến thức quá dài]';
+
+  const appts = (customer.appointments || []).map(a => ({
+    date: a.date || '', time: a.time || '', content: a.content || '', isCompleted: !!a.isCompleted
+  }));
+  const savedAt = customer.updatedAt ? new Date(customer.updatedAt).toISOString() : '';
+
+  const prompt = `
+Bạn là CỐ VẤN KINH DOANH CẤP CAO của IDECO, chuyên hỗ trợ Ban Giám đốc và nhân viên kinh doanh xử lý khách hàng dược/nhà thuốc.
+
+MỤC TIÊU:
+Phân tích HỒ SƠ ĐÃ LƯU MỚI NHẤT của khách hàng và đưa ra hướng xử lý thực tế, thông minh, có thứ tự ưu tiên. Khi có Kho kiến thức nội bộ IDECO phù hợp, phải ưu tiên vận dụng nội dung đó. Không được tự bịa giá, chiết khấu, chính sách, phản hồi khách hoặc cam kết của công ty.
+
+HỒ SƠ KHÁCH HÀNG MỚI NHẤT:
+- Tên khách hàng: ${customer.name || ''}
+- Người liên hệ: ${customer.contactPerson || ''}
+- Điện thoại: ${customer.phone || ''}
+- Loại khách: ${customer.type || ''}
+- Địa chỉ: ${customer.address || ''} ${customer.province || ''}
+- Trạng thái giao dịch: ${customer.status || ''}
+- Ngày giao dịch: ${customer.transactionDate || ''}
+- Thời điểm lưu/cập nhật gần nhất: ${savedAt}
+- Nội dung báo cáo mới nhất:\n${customer.report || '(trống)'}
+- Khách hàng phản hồi:\n${customer.customerFeedback || '(trống)'}
+- Lịch hẹn / bước tiếp theo:\n${JSON.stringify(appts)}
+
+KHO KIẾN THỨC XỬ LÝ TÌNH HUỐNG NỘI BỘ IDECO:
+${knowledgeText || '(Chưa có nội dung trong kho nội bộ)'}
+
+NGUYÊN TẮC PHÂN TÍCH:
+1. Tách rõ SỰ THẬT đã có trong hồ sơ với SUY LUẬN/ĐỀ XUẤT.
+2. Xác định khách đang ở giai đoạn nào: mới tiếp cận, quan tâm, cân nhắc, trì hoãn, từ chối, đàm phán, chờ chính sách, sắp đặt hàng, đã thành công, hoặc cần tái kích hoạt.
+3. Phát hiện rào cản chính: sản phẩm, giá, chiết khấu, công nợ, đổi trả, tồn kho, nhu cầu, người quyết định, thời gian phản hồi, đối thủ, hay thiếu thông tin.
+4. Đưa ra 3-6 hành động tiếp theo theo THỨ TỰ ƯU TIÊN. Mỗi hành động phải có lý do và mục tiêu.
+5. Nếu phù hợp, tạo một câu gợi ý nhân viên có thể nói/nhắn với khách. Không tự tạo chính sách hoặc con số chưa được cung cấp.
+6. Nêu thông tin còn thiếu mà nhân viên nên bổ sung để Ban Giám đốc ra quyết định tốt hơn.
+7. Nếu cần Ban Giám đốc hỗ trợ, nói rõ cần duyệt/quyết định/chuẩn bị nội dung gì; nếu chưa cần thì ghi rõ chưa cần.
+8. Nếu dùng kiến thức nội bộ, liệt kê đúng TIÊU ĐỀ đã tham chiếu. Không nói đã dùng nếu không thực sự phù hợp.
+9. Tránh lời khuyên chung chung kiểu “chăm sóc tốt hơn”; phải chỉ rõ nên làm gì tiếp theo.
+
+TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
+{
+  "situationSummary":"Tóm tắt tình huống hiện tại 2-4 câu",
+  "stage":"Giai đoạn khách hàng",
+  "priority":"Cao|Trung bình|Thấp",
+  "mainBarrier":"Rào cản chính hoặc chưa xác định",
+  "opportunities":["..."],
+  "risks":["..."],
+  "recommendedActions":[
+    {"step":1,"action":"Việc cần làm","reason":"Vì sao","goal":"Mục tiêu","suggestedScript":"Câu gợi ý có thể dùng với khách hoặc để trống"}
+  ],
+  "missingInfo":["Thông tin còn thiếu cần khai thác"],
+  "managementSupport":"Nội dung BGĐ nên hỗ trợ/duyệt hoặc 'Chưa cần hỗ trợ đặc biệt'",
+  "nextFollowUp":"Đề xuất thời điểm/cách theo dõi tiếp; nếu hồ sơ không đủ dữ liệu thời gian thì nói cần chốt lịch cụ thể",
+  "knowledgeUsed":["Đúng tiêu đề kiến thức nội bộ đã sử dụng"],
+  "finalAdvice":"Kết luận hướng xử lý tốt nhất, ngắn gọn nhưng cụ thể"
+}`;
+
+  const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
+  const r = safeJson(raw, null);
+  if (!r) throw new Error('AI_BAD_JSON');
+  return r;
+}
+
+/* Doc noi dung PDF/Word de dua vao Kho kien thuc; chi luu TEXT, khong luu file nhi phan */
+async function extractKnowledgeFileText(file) {
+  if (!file) throw new Error('NO_FILE');
+  const name = String(file.name || '').toLowerCase();
+  const buf = await file.arrayBuffer();
+
+  if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+    if (!window.pdfjsLib) throw new Error('PDF_LIB_MISSING');
+    const pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const tc = await page.getTextContent();
+      pages.push(tc.items.map(it => it.str || '').join(' ').replace(/\s+/g, ' ').trim());
+    }
+    return pages.filter(Boolean).join('\n\n');
+  }
+
+  if (name.endsWith('.docx')) {
+    if (!window.mammoth) throw new Error('DOCX_LIB_MISSING');
+    const r = await window.mammoth.extractRawText({ arrayBuffer: buf });
+    return String(r.value || '').trim();
+  }
+
+  if (name.endsWith('.txt') || (file.type || '').startsWith('text/')) {
+    return new TextDecoder('utf-8').decode(buf).trim();
+  }
+
+  if (name.endsWith('.doc')) throw new Error('OLD_DOC_UNSUPPORTED');
+  throw new Error('UNSUPPORTED_FILE');
 }
 
 /* ---------------- Helpers ---------------- */
@@ -777,6 +923,197 @@ function burstConfetti() {
   }
 }
 
+
+/* ========================= KHO KIEN THUC XU LY TINH HUONG ========================= */
+function KnowledgeBaseSettings({ notify }) {
+  const [items, setItems] = useState([]);
+  const [editingId, setEditingId] = useState('');
+  const [title, setTitle] = useState('');
+  const [content, setContent] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [fileBusy, setFileBusy] = useState(false);
+  const [listening, setListening] = useState(false);
+  const recRef = useRef(null);
+  const speechBaseRef = useRef('');
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    const off = dbOnValue('settings/aiHandlingKnowledge', d => setItems(normalizeKnowledgeEntries(d)));
+    return () => { off && off(); stopSpeech(); };
+  }, []);
+
+  const newItem = () => {
+    stopSpeech();
+    setEditingId(''); setTitle(''); setContent('');
+  };
+
+  const editItem = (it) => {
+    stopSpeech();
+    setEditingId(it.id || ''); setTitle(it.title || ''); setContent(it.content || '');
+  };
+
+  const saveItem = async () => {
+    const t = title.trim(), c = content.trim();
+    if (!t) { notify('Vui lòng nhập tiêu đề tình huống', 'warning'); return; }
+    if (!c) { notify('Vui lòng nhập nội dung cách xử lý', 'warning'); return; }
+    const id = editingId || uuid();
+    const old = items.find(x => x.id === id);
+    const payload = {
+      id, title: t, content: c,
+      createdAt: old?.createdAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    setSaving(true);
+    const ok = await dbSet(`settings/aiHandlingKnowledge/${id}`, payload);
+    setSaving(false);
+    if (!ok) { notify('Không lưu được kho kiến thức lên Firebase', 'error'); return; }
+    setEditingId(id);
+    notify('Đã lưu tình huống vào Kho kiến thức AI', 'success');
+  };
+
+  const removeItem = async (it) => {
+    if (!window.confirm(`Xóa tình huống “${it.title}”?`)) return;
+    const ok = await dbRemove(`settings/aiHandlingKnowledge/${it.id}`);
+    if (!ok) { notify('Không xóa được nội dung', 'error'); return; }
+    if (editingId === it.id) newItem();
+    notify('Đã xóa tình huống', 'success');
+  };
+
+  function stopSpeech() {
+    const r = recRef.current; recRef.current = null;
+    if (r) { r.onend = null; r.onresult = null; try { r.stop(); } catch (e) {} }
+    setListening(false);
+  }
+
+  const toggleSpeech = () => {
+    if (recRef.current) { stopSpeech(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { notify('Trình duyệt này chưa hỗ trợ chuyển giọng nói thành văn bản', 'error'); return; }
+    const rec = new SR();
+    rec.lang = 'vi-VN'; rec.interimResults = true; rec.continuous = true;
+    speechBaseRef.current = content || '';
+    rec.onresult = (e) => {
+      let interim = '', finalText = '';
+      for (let i = e.resultIndex; i < e.results.length; ++i) {
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      if (finalText) {
+        const f = finalText.charAt(0).toUpperCase() + finalText.slice(1);
+        speechBaseRef.current += (speechBaseRef.current ? '\n' : '') + f;
+      }
+      setContent(speechBaseRef.current + (interim ? (speechBaseRef.current ? '\n' : '') + interim : ''));
+    };
+    rec.onerror = () => { stopSpeech(); };
+    rec.onend = () => { if (recRef.current === rec) { try { rec.start(); } catch (e) { stopSpeech(); } } };
+    recRef.current = rec; setListening(true);
+    try { rec.start(); } catch (e) { stopSpeech(); }
+  };
+
+  const uploadFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setFileBusy(true);
+    try {
+      let txt = await extractKnowledgeFileText(file);
+      if (!txt) throw new Error('EMPTY_FILE_TEXT');
+      const max = 150000;
+      if (txt.length > max) {
+        txt = txt.slice(0, max) + '\n\n[Phần còn lại của tài liệu đã được lược bớt do dung lượng quá lớn.]';
+        notify('Tài liệu rất dài — đã lấy 150.000 ký tự đầu để tránh kho dữ liệu quá nặng', 'warning', 5000);
+      } else notify(`Đã đọc nội dung từ ${file.name}`, 'success');
+      if (!title.trim()) setTitle(file.name.replace(/\.(pdf|docx|txt)$/i, ''));
+      setContent(prev => (prev.trim() ? prev.trim() + '\n\n' : '') + txt);
+    } catch (err) {
+      const code = String(err && err.message || err);
+      const msg = code.includes('OLD_DOC') ? 'File .doc đời cũ chưa đọc trực tiếp được. Hãy lưu lại thành .docx rồi tải lên.'
+        : code.includes('PDF_LIB') ? 'Không tải được bộ đọc PDF. Kiểm tra kết nối Internet rồi thử lại.'
+        : code.includes('DOCX_LIB') ? 'Không tải được bộ đọc Word. Kiểm tra kết nối Internet rồi thử lại.'
+        : code.includes('EMPTY_FILE_TEXT') ? 'Không trích xuất được chữ từ tài liệu này. PDF có thể là bản scan hình ảnh.'
+        : 'Chỉ hỗ trợ Word .docx, PDF hoặc TXT.';
+      notify(msg, 'error', 5500);
+    } finally { setFileBusy(false); }
+  };
+
+  return (
+    <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber2 flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
+          <div>
+            <h3 className="font-display text-[17px] font-extrabold text-ink">Kho kiến thức xử lý tình huống AI</h3>
+            <p className="text-[11px] text-slate-400 font-semibold">Kinh nghiệm nội bộ để AI tư vấn sát cách IDECO xử lý khách hàng</p>
+          </div>
+        </div>
+        <button onClick={newItem} className="btn px-3.5 py-2.5 bg-ink text-white text-[11.5px]">
+          <I.Plus width="14" height="14" /> Thêm mới
+        </button>
+      </div>
+
+      <p className="text-[12.5px] text-slate-500 leading-relaxed mb-5">
+        Mỗi mục gồm một tình huống và cách xử lý chuẩn. AI sẽ tham chiếu kho này khi phân tích hồ sơ khách hàng mới nhất. Có thể nhập bằng bàn phím, giọng nói hoặc lấy chữ từ Word/PDF.
+      </p>
+
+      <div className="space-y-4">
+        <Field label="Tiêu đề tình huống">
+          <input value={title} onChange={e => setTitle(e.target.value)} className="fld font-bold" placeholder="Ví dụ: Khách chê giá cao và yêu cầu tăng chiết khấu" />
+        </Field>
+        <Field label="Nội dung / cách xử lý">
+          <textarea value={content} onChange={e => setContent(e.target.value)} className="fld leading-relaxed text-[13px]"
+            placeholder="Mô tả tình huống, nguyên tắc xử lý, câu hỏi cần khai thác, chính sách được phép đề xuất, bước tiếp theo..."
+            style={{ resize:'vertical', minHeight:'170px', maxHeight:'520px' }} />
+        </Field>
+
+        <div className="grid sm:grid-cols-2 gap-2">
+          <button onClick={toggleSpeech}
+            className={`btn py-3 text-[12px] border ${listening ? 'bg-crimson text-white border-crimson' : 'bg-blue-50 text-brand border-blue-100'}`}>
+            {listening ? <><span className="w-2.5 h-2.5 bg-white rounded-sm pulse-ring" /> Đang nghe — bấm để dừng</>
+              : <><I.Mic width="15" height="15" /> Nói thành văn bản</>}
+          </button>
+          <button onClick={() => fileRef.current && fileRef.current.click()} disabled={fileBusy}
+            className="btn py-3 bg-paper text-slate-600 border border-line text-[12px] disabled:opacity-60">
+            {fileBusy ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Upload width="15" height="15" />}
+            {fileBusy ? 'Đang đọc tài liệu…' : 'Tải Word / PDF'}
+          </button>
+          <input ref={fileRef} type="file" accept=".docx,.pdf,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            onChange={uploadFile} className="hidden" />
+        </div>
+
+        <button onClick={saveItem} disabled={saving}
+          className="btn w-full py-3.5 bg-amber2 text-white text-[13px] uppercase tracking-wider shadow-lift disabled:opacity-60">
+          {saving ? <I.Loader width="16" height="16" className="animate-spin" /> : <I.Save width="16" height="16" />}
+          {saving ? 'Đang lưu…' : (editingId ? 'Lưu cập nhật' : 'Lưu vào kho kiến thức')}
+        </button>
+      </div>
+
+      <div className="mt-6 pt-5 border-t border-line">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <p className="lbl mb-0">Nội dung đã lưu ({items.length})</p>
+          {editingId && <span className="text-[10.5px] font-bold text-amber2">Đang sửa 1 mục</span>}
+        </div>
+        {items.length === 0 ? (
+          <div className="rounded-2xl bg-paper p-4 text-[12.5px] text-slate-400 text-center">Chưa có tình huống nào trong kho.</div>
+        ) : (
+          <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+            {items.map(it => (
+              <div key={it.id} className={`spine rounded-2xl border p-4 pl-5 ${editingId === it.id ? 'bg-amber-50/60 border-amber-200' : 'bg-paper border-transparent'}`}
+                   style={{ '--spine': editingId === it.id ? '#e08a1e' : '#cbd5e1' }}>
+                <p className="font-bold text-ink text-[13.5px]">{it.title}</p>
+                <p className="text-[11.5px] text-slate-500 mt-1.5 line-clamp-2 leading-relaxed">{it.content}</p>
+                <div className="flex gap-2 mt-3">
+                  <button onClick={() => editItem(it)} className="btn px-3 py-2 bg-white border border-line text-brand text-[11px]"><I.Edit width="13" height="13" /> Sửa</button>
+                  <button onClick={() => removeItem(it)} className="btn px-3 py-2 bg-white border border-rose-100 text-crimson text-[11px]"><I.Trash width="13" height="13" /> Xóa</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /* ================================ APP ==================================== */
 
 function App() {
@@ -805,6 +1142,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('staff');
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [quickReportCustomer, setQuickReportCustomer] = useState(null);
+  /* Hồ sơ được mở trực tiếp từ nút "Huyền gợi ý" ngoài danh sách khách hàng */
+  const [advisorCustomer, setAdvisorCustomer] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [notification, setNotification] = useState(null);
@@ -823,6 +1162,8 @@ function App() {
   const [isVoiceDeclListening, setIsVoiceDeclListening] = useState(false);
   const [isVoiceDeclAnalyzing, setIsVoiceDeclAnalyzing] = useState(false);
   const [voiceDeclNotice, setVoiceDeclNotice] = useState(null);
+  const [voiceQualityIssues, setVoiceQualityIssues] = useState([]);
+  const [voiceQualityAdvice, setVoiceQualityAdvice] = useState('');
   const voiceDeclRecognitionRef = useRef(null);
   const voiceDeclListeningRef = useRef(false);
   const voiceDeclBaseRef = useRef('');
@@ -874,7 +1215,7 @@ function App() {
     id: '', salesRep: '', transactionDate: getLocalDateString(new Date()),
     name: '', contactPerson: '', address: '', province: 'TP Hồ Chí Minh',
     phone: '', emailMST: '', type: CustomerType.NHA_THUOC, status: TransactionStatus.DANG_THEO_DOI,
-    report: '', appointments: [], updatedAt: Date.now()
+    report: '', customerFeedback: '', appointments: [], updatedAt: Date.now()
   };
   const [formData, setFormData] = useState(emptyForm);
   const [newAppointment, setNewAppointment] = useState({ date: '', time: '', content: '' });
@@ -999,16 +1340,18 @@ function App() {
   }, [isUnlocked]);
 
   /* ============== report validation (identical rules) ============== */
-  const isReportValid = (text) => {
+  const isReportValid = (text, customerFeedback = '') => {
     if (!text || text.trim().length === 0) return { valid: false, msg: 'Vui lòng nhập nội dung báo cáo giao dịch.' };
     const lowerText = text.toLowerCase();
+    const feedbackText = String(customerFeedback || '').toLowerCase();
+    const combinedFeedbackText = `${lowerText} ${feedbackText}`;
     const wordCount = text.trim().split(/\s+/).length;
 
     if (wordCount < 25) {
       return { valid: false, msg: `Bạn ơi, báo cáo giao dịch quá ngắn (dưới 25 từ). Làm sao bàn bạc giải pháp để phát triển tiếp theo?\n\nBạn nên viết rất cụ thể tên sản phẩm/thuốc và phản hồi của khách.\n\nBạn nên hiểu việc báo cáo tốt giúp bạn quản lý tốt hơn, hiểu tình huống hơn và cấp trên của bạn và đặc biệt BGĐ hiểu rõ bạn đang giao dịch vì để hỗ trợ xử lý khi cần cho bạn. Bạn phải cập nhật tình huống khi giao dịch xong nhé. Nếu BGĐ đọc mà nội dung cũ thì không tốt. Tôi là trợ lý IDECO của BGĐ giúp bạn tốt hơn.\n\n(Lưu ý: Hệ thống sẽ KHÔNG CHO LƯU hồ sơ nếu nội dung báo cáo không rõ ràng!)` };
     }
 
-    const hasFeedback = /(phản hồi|ý kiến|nói|bảo|chê|khen|đắt|rẻ|giá|cần|muốn|hỏi|quan tâm|ok|chốt|không nhu cầu|chưa có nhu cầu|để xem lại|gởi báo giá|gửi báo giá|hẹn lần sau|loại thuốc nào|từ chối|đồng ý|mua|lấy|xem xét|tham khảo)/i.test(lowerText);
+    const hasFeedback = /(phản hồi|ý kiến|nói|bảo|chê|khen|đắt|rẻ|giá|cần|muốn|hỏi|quan tâm|ok|chốt|không nhu cầu|chưa có nhu cầu|để xem lại|gởi báo giá|gửi báo giá|hẹn lần sau|loại thuốc nào|từ chối|đồng ý|mua|lấy|xem xét|tham khảo)/i.test(combinedFeedbackText);
     if (!hasFeedback) {
       return { valid: false, msg: `Bạn ơi, báo cáo giao dịch mà không có nội dung phản hồi của khách hàng (ví dụ: chê giá cao, không nhu cầu, để xem lại, hãy gởi báo giá, hẹn lần sau, loại thuốc nào...)? Dù là lần đầu tiếp xúc cũng cần ghi rõ phản hồi của khách.\n\nBạn nên hiểu việc báo cáo tốt giúp bạn quản lý tốt hơn, hiểu tình huống hơn và cấp trên của bạn và đặc biệt BGĐ hiểu rõ bạn đang giao dịch vì để hỗ trợ xử lý khi cần cho bạn. Bạn phải cập nhật tình huống khi giao dịch xong nhé. Nếu BGĐ đọc mà nội dung cũ thì không tốt. Tôi là trợ lý IDECO của BGĐ giúp bạn tốt hơn.\n\n(Lưu ý: Hệ thống sẽ KHÔNG CHO LƯU hồ sơ nếu nội dung báo cáo không rõ ràng!)` };
     }
@@ -1042,7 +1385,7 @@ function App() {
   useEffect(() => {
     if (!formData.report || hasWarnedReport || view !== 'editor') return;
     const t = setTimeout(() => {
-      const v = isReportValid(formData.report);
+      const v = isReportValid(formData.report, formData.customerFeedback || '');
       if (!v.valid && v.msg) { setReportWarningMsg(v.msg); setHasWarnedReport(true); }
     }, 3000);
     return () => clearTimeout(t);
@@ -1110,7 +1453,7 @@ function App() {
   useEffect(() => {
     if (!isUnlocked || !currentStaff) return;
     const iv = setInterval(() => {
-      if (activeAlert || confirmModal || overdueReminder || adviceModal || quickReportCustomer) return;
+      if (activeAlert || confirmModal || overdueReminder || adviceModal || quickReportCustomer || advisorCustomer) return;
       const now = new Date();
       let found = false;
       for (const c of customers) {
@@ -1138,13 +1481,13 @@ function App() {
       if (!found) setActiveAlert(null);
     }, 20000);
     return () => clearInterval(iv);
-  }, [customers, isUnlocked, currentStaff, activeAlert, confirmModal, overdueReminder, adviceModal, quickReportCustomer]);
+  }, [customers, isUnlocked, currentStaff, activeAlert, confirmModal, overdueReminder, adviceModal, quickReportCustomer, advisorCustomer]);
 
   /* ============== overdue-with-no-future-appointment monitor ============== */
   useEffect(() => {
     if (!isUnlocked || !currentStaff) return;
     const iv = setInterval(() => {
-      if (activeAlert || confirmModal || overdueReminder || adviceModal || quickReportCustomer) return;
+      if (activeAlert || confirmModal || overdueReminder || adviceModal || quickReportCustomer || advisorCustomer) return;
       for (const c of customers) {
         if (c.salesRep !== currentStaff.name) continue;
         if (!isCustomerOverdue(c)) continue;
@@ -1159,7 +1502,7 @@ function App() {
       }
     }, 5000);
     return () => clearInterval(iv);
-  }, [isUnlocked, currentStaff, customers, activeAlert, confirmModal, overdueReminder, adviceModal, quickReportCustomer]);
+  }, [isUnlocked, currentStaff, customers, activeAlert, confirmModal, overdueReminder, adviceModal, quickReportCustomer, advisorCustomer]);
 
   /* ============== target goal ============== */
   useEffect(() => {
@@ -1317,7 +1660,7 @@ function App() {
     }
 
     if (formData.report) {
-      const v = isReportValid(formData.report);
+      const v = isReportValid(formData.report, formData.customerFeedback || '');
       if (!v.valid && v.msg) { notify('Nhắc nhở: Báo cáo chưa đạt yêu cầu!', 'warning'); setReportWarningMsg(v.msg); }
       else setReportWarningMsg(null);
     } else {
@@ -1434,7 +1777,8 @@ function App() {
       notify('Tài khoản của bạn đã bị khóa, chỉ có thể chỉnh sửa các khách hàng quá hạn!', 'error'); return;
     }
     setSelectedCustomerId(c.id);
-    setFormData({ ...c, appointments: c.appointments || [] });
+    setVoiceQualityIssues([]); setVoiceQualityAdvice('');
+    setFormData({ ...c, customerFeedback: c.customerFeedback || '', appointments: c.appointments || [] });
     setView('editor');
   };
 
@@ -1442,6 +1786,7 @@ function App() {
     if (!currentStaff) { notify('Vui lòng chọn nhân viên trước khi thêm khách hàng!', 'error'); setActiveTab('staff'); return; }
     if (currentStaff.isLocked) { notify('Tài khoản của bạn đã bị khóa chức năng khai báo!', 'error'); return; }
     setSelectedCustomerId(null);
+    setVoiceQualityIssues([]); setVoiceQualityAdvice('');
     setFormData({ ...emptyForm, salesRep: currentStaff.name, ...(prefill || {}) });
     setNewAppointment({ date: '', time: '', content: '' });
     setView('editor');
@@ -1450,7 +1795,7 @@ function App() {
   const handleAnalyze = async () => {
     if (!formData.report) { notify('Vui lòng nhập nội dung báo cáo', 'warning'); return; }
     setIsAnalyzing(true);
-    const r = await analyzeAndRefineReport(formData.report);
+    const r = await analyzeAndRefineReport(formData.report, formData.customerFeedback || '');
     setFormData(prev => ({ ...prev, report: r.text }));
     if (r.message) setAdviceModal(r.message);
     setIsAnalyzing(false);
@@ -1460,7 +1805,7 @@ function App() {
     if (!formData.report) { notify('Vui lòng nhập nội dung báo cáo để hoàn thiện', 'warning'); return; }
     setIsEnhancing(true);
     try {
-      const r = await analyzeAndRefineReport(formData.report);
+      const r = await analyzeAndRefineReport(formData.report, formData.customerFeedback || '');
       setFormData(prev => ({ ...prev, report: r.text }));
       if (r.message) setAdviceModal(r.message);
       notify('Đã hoàn thiện văn bản báo cáo', 'success');
@@ -1504,6 +1849,7 @@ function App() {
       'Tên khách hàng': c.name,
       'Người liên hệ': c.contactPerson,
       'Điện thoại': c.phone,
+      'Khách hàng phản hồi': c.customerFeedback || '',
       'Báo cáo giao dịch': c.report,
       'Trạng thái giao dịch': c.status,
       'Nội dung hẹn': (c.appointments && c.appointments.length)
@@ -1511,7 +1857,7 @@ function App() {
       'Địa chỉ': c.address
     }));
     const ws = XLSX.utils.json_to_sheet(data);
-    ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 18 }, { wch: 14 }, { wch: 60 }, { wch: 22 }, { wch: 40 }, { wch: 34 }];
+    ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 18 }, { wch: 14 }, { wch: 44 }, { wch: 60 }, { wch: 22 }, { wch: 40 }, { wch: 34 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Báo cáo');
     XLSX.writeFile(wb, `Bao_cao_giao_dich_${dateRange.start}_to_${dateRange.end}.xlsx`);
@@ -2207,14 +2553,21 @@ function App() {
         address: r.address || prev.address,
         province: (r.province && VIETNAM_PROVINCES.includes(r.province)) ? r.province : prev.province,
         type: (r.type && allowedTypes.includes(r.type)) ? r.type : prev.type,
-        report: r.report || prev.report
+        report: r.report || prev.report,
+        customerFeedback: r.customerFeedback || prev.customerFeedback || ''
       }));
       const missing = r.missing || [];
+      const qualityIssues = r.qualityIssues || [];
+      setVoiceQualityIssues(qualityIssues);
+      setVoiceQualityAdvice(r.qualityAdvice || '');
       if (missing.length) {
-        setVoiceDeclNotice({ type: 'warning', text: `AI đã điền các thông tin nhận diện được. Còn thiếu: ${missing.join(', ')}.` });
+        setVoiceDeclNotice({ type: 'warning', text: `AI đã điền các thông tin nhận diện được. Còn thiếu thông tin khai báo: ${missing.join(', ')}.` });
         notify(`Còn thiếu: ${missing.join(', ')}`, 'warning', 6500);
+      } else if (qualityIssues.length) {
+        setVoiceDeclNotice({ type: 'warning', text: 'AI đã tự điền dữ liệu. Báo cáo vẫn còn vài điểm nên bổ sung để Ban Giám đốc dễ xử lý hơn.' });
+        notify('AI đã điền dữ liệu và phát hiện nội dung báo cáo nên bổ sung', 'warning', 5200);
       } else {
-        setVoiceDeclNotice({ type: 'success', text: 'AI đã nhận diện đủ các mục khai báo và tự động điền vào biểu mẫu bên dưới.' });
+        setVoiceDeclNotice({ type: 'success', text: 'AI đã nhận diện đủ thông tin và báo cáo có các nội dung chính cần thiết.' });
         notify('Đã phân tích và tự động điền thông tin khách hàng', 'success', 3600);
       }
     } catch (e) {
@@ -2432,6 +2785,10 @@ function App() {
   const liveQuickReport = quickReportCustomer
     ? (customers.find(c => c.id === quickReportCustomer.id) || quickReportCustomer)
     : null;
+  /* Nút Huyền gợi ý ngoài danh sách cũng luôn dùng bản khách hàng mới nhất từ Firebase */
+  const liveAdvisorCustomer = advisorCustomer
+    ? (customers.find(c => c.id === advisorCustomer.id) || advisorCustomer)
+    : null;
   /* So gop y chua xem cua nhan vien dang dang nhap */
   const unseenFeedbackCount = currentStaff
     ? customers.filter(c => c.salesRep === currentStaff.name && c.feedback && c.feedback.text && !c.feedback.seenAt).length
@@ -2448,6 +2805,7 @@ function App() {
         handleConfirmTarget={handleConfirmTarget}
         targetWarning={targetWarning} setTargetWarning={setTargetWarning}
         quickReportCustomer={liveQuickReport} setQuickReportCustomer={setQuickReportCustomer}
+        advisorCustomer={liveAdvisorCustomer} setAdvisorCustomer={setAdvisorCustomer}
         mgrUnlocked={mgrUnlocked} setMgrUnlocked={setMgrUnlocked}
         onSaveFeedback={handleSaveFeedback} onDeleteFeedback={handleDeleteFeedback}
         notify={notify}
@@ -2963,7 +3321,7 @@ function App() {
                       <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400 flex items-center gap-1.5 min-w-0 truncate">
                         <I.User width="12" height="12" /> {c.salesRep}
                       </span>
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                         {c.feedback?.text && (
                           <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
                             title="Ban Giám đốc / Quản lý đã góp ý — bấm để xem"
@@ -2971,6 +3329,11 @@ function App() {
                             <I.Message width="12" height="12" /> Đã góp ý
                           </button>
                         )}
+                        <button onClick={(e) => { e.stopPropagation(); setAdvisorCustomer(c); }}
+                          title="Tự phân tích bản lưu mới nhất và Kho kiến thức trong Cài đặt"
+                          className="btn px-3 py-1.5 bg-amber-50 text-amber2 text-[11px] border border-amber-100">
+                          <I.Sparkles width="12" height="12" /> Huyền gợi ý
+                        </button>
                         <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
                           className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px]">
                           <I.Sparkles width="12" height="12" /> Báo cáo nhanh
@@ -3381,10 +3744,16 @@ function App() {
                                 <I.Message width="12" height="12" /> {r.feedback.seenAt ? 'NV đã xem góp ý' : 'Đã góp ý — chờ NV xem'}
                               </span>
                             : <span className="text-[10.5px] font-bold uppercase tracking-wide text-slate-300">Chưa có góp ý</span>}
-                          <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(r); }}
-                            className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px] shrink-0">
-                            <I.Sparkles width="12" height="12" /> Báo cáo nhanh
-                          </button>
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            <button onClick={(e) => { e.stopPropagation(); setAdvisorCustomer(r); }}
+                              className="btn px-3 py-1.5 bg-amber-50 text-amber2 text-[11px] shrink-0 border border-amber-100">
+                              <I.Sparkles width="12" height="12" /> Huyền gợi ý
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(r); }}
+                              className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px] shrink-0">
+                              <I.Sparkles width="12" height="12" /> Báo cáo nhanh
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -3468,6 +3837,8 @@ function App() {
                     </button>
                   </div>
                 </section>
+
+                <KnowledgeBaseSettings notify={notify} />
               </React.Fragment>
             )}
 
@@ -3534,6 +3905,15 @@ function App() {
             {voiceDeclNotice && (
               <div className={`mt-2.5 rounded-xl px-3.5 py-2.5 text-[11.5px] font-semibold border ${voiceDeclNotice.type === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : voiceDeclNotice.type === 'error' ? 'bg-rose-50 text-crimson border-rose-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
                 {voiceDeclNotice.text}
+              </div>
+            )}
+            {voiceQualityIssues.length > 0 && (
+              <div className="mt-2.5 rounded-2xl border border-violet-200 bg-violet-50/70 p-3.5">
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 flex items-center gap-1.5"><I.Sparkles width="13" height="13" /> AI gợi ý nâng chất báo cáo</p>
+                <ul className="mt-2 space-y-1.5">
+                  {voiceQualityIssues.map((it, idx) => <li key={idx} className="text-[11.5px] text-slate-600 leading-relaxed flex gap-2"><span className="text-violet2 font-extrabold">•</span><span>{it}</span></li>)}
+                </ul>
+                {voiceQualityAdvice && <p className="mt-2.5 pt-2.5 border-t border-violet-100 text-[11.5px] font-semibold text-ink leading-relaxed">{voiceQualityAdvice}</p>}
               </div>
             )}
           </div>
@@ -3633,12 +4013,22 @@ function App() {
                   </button>
                 </div>
               </div>
+              <div className="mb-4">
+                <Field label="Khách hàng phản hồi">
+                  <textarea value={formData.customerFeedback || ''} onFocus={() => handleFocus('customerFeedback')}
+                    onChange={e => setFormData({ ...formData, customerFeedback: e.target.value })}
+                    placeholder="AI sẽ tự điền nếu phát hiện lời phản hồi của khách: quan tâm sản phẩm nào, đồng ý/từ chối, vướng giá/chính sách, yêu cầu gửi báo giá, hẹn phản hồi..."
+                    className="fld min-h-[110px] leading-relaxed resize-y text-[13.5px]" />
+                </Field>
+                <p className="text-[10.5px] text-slate-400 mt-1.5">Chỉ ghi phản hồi thực tế của khách hàng; không suy đoán thay khách.</p>
+              </div>
+
               <textarea value={formData.report} onFocus={() => handleFocus('report')}
                 onChange={e => setFormData({ ...formData, report: e.target.value })}
-                placeholder="Ghi rõ: sản phẩm đã chào, phản hồi của khách, vướng mắc và hướng xử lý tiếp theo..."
+                placeholder="Ghi rõ: sản phẩm/danh mục đã chào, chính sách bán hàng đã trao đổi, vướng mắc, việc cần BGĐ hỗ trợ và bước xử lý tiếp theo..."
                 className="fld h-44 leading-relaxed resize-y text-[14px]" />
               <p className="text-[11px] text-slate-400 mt-2">
-                {formData.report ? formData.report.trim().split(/\s+/).filter(Boolean).length : 0} từ · nên từ 25 từ trở lên, có tên sản phẩm và phản hồi khách hàng.
+                {formData.report ? formData.report.trim().split(/\s+/).filter(Boolean).length : 0} từ · nên từ 25 từ trở lên, có sản phẩm/danh mục, chính sách đã trao đổi và bước xử lý tiếp theo.
               </p>
             </section>
 
@@ -3707,6 +4097,7 @@ function Popups({
   showTargetPopup, targetGoal, setTargetGoal, handleConfirmTarget,
   targetWarning, setTargetWarning,
   quickReportCustomer, setQuickReportCustomer,
+  advisorCustomer, setAdvisorCustomer,
   mgrUnlocked, setMgrUnlocked,
   onSaveFeedback, onDeleteFeedback, notify
 }) {
@@ -3725,6 +4116,68 @@ function Popups({
   const [fbListening, setFbListening] = useState(false);
   const fbRecRef  = useRef(null);
   const fbBaseRef = useRef('');
+
+  /* AI co van tren HO SO DA LUU MOI NHAT */
+  const [advisorBusy, setAdvisorBusy] = useState(false);
+  const [advisorResult, setAdvisorResult] = useState(null);
+  const [advisorError, setAdvisorError] = useState('');
+
+  const runAdvisor = async () => {
+    if (!quickReportCustomer) return;
+    setAdvisorBusy(true); setAdvisorError(''); setAdvisorResult(null);
+    try {
+      const r = await analyzeLatestCustomerStrategy(quickReportCustomer);
+      setAdvisorResult(r);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      setAdvisorError(msg === 'NO_KEY'
+        ? 'Chưa có Gemini API key. Vào Hệ thống → Cài đặt AI để nhập key.'
+        : 'AI chưa phân tích được hồ sơ này. Kiểm tra kết nối hoặc API key rồi thử lại.');
+    } finally { setAdvisorBusy(false); }
+  };
+
+  /* Cố vấn mở trực tiếp từ thẻ khách hàng: mở là tự phân tích, không cần bấm lần hai */
+  const [directAdvisorBusy, setDirectAdvisorBusy] = useState(false);
+  const [directAdvisorResult, setDirectAdvisorResult] = useState(null);
+  const [directAdvisorError, setDirectAdvisorError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!advisorCustomer) {
+        setDirectAdvisorBusy(false); setDirectAdvisorResult(null); setDirectAdvisorError('');
+        return;
+      }
+      setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
+      try {
+        const r = await analyzeLatestCustomerStrategy(advisorCustomer);
+        if (!cancelled) setDirectAdvisorResult(r);
+      } catch (e) {
+        if (cancelled) return;
+        const msg = String(e && e.message || e);
+        setDirectAdvisorError(msg === 'NO_KEY'
+          ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.'
+          : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.');
+      } finally { if (!cancelled) setDirectAdvisorBusy(false); }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [advisorCustomer ? advisorCustomer.id : null, advisorCustomer ? advisorCustomer.updatedAt : null]);
+
+  const rerunDirectAdvisor = async () => {
+    if (!advisorCustomer) return;
+    setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
+    try {
+      const r = await analyzeLatestCustomerStrategy(advisorCustomer);
+      setDirectAdvisorResult(r);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      setDirectAdvisorError(msg === 'NO_KEY'
+        ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.'
+        : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.');
+    } finally { setDirectAdvisorBusy(false); }
+  };
+
 
   const stopFbMic = () => {
     const r = fbRecRef.current;
@@ -3764,6 +4217,7 @@ function Popups({
   useEffect(() => {
     stopFbMic();
     setFbEditing(false); setFbGate(false); setFbPass(''); setFbSaving(false);
+    setAdvisorResult(null); setAdvisorError(''); setAdvisorBusy(false);
     setFbText((quickReportCustomer && quickReportCustomer.feedback && quickReportCustomer.feedback.text) || '');
     return () => stopFbMic();
   }, [quickReportCustomer ? quickReportCustomer.id : null]);
@@ -3913,6 +4367,133 @@ function Popups({
       </Modal>
 
       {/* quick report */}
+      {/* HUYỀN GỢI Ý — mở trực tiếp từ danh sách khách hàng, tự chạy ngay */}
+      <Modal open={!!advisorCustomer} z={1092} max="max-w-2xl" onClose={() => setAdvisorCustomer(null)}>
+        {advisorCustomer && (
+          <div className="p-5 sm:p-6">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div className="min-w-0">
+                <p className="text-[10.5px] font-extrabold uppercase tracking-[.12em] text-amber2 flex items-center gap-1.5">
+                  <I.Sparkles width="13" height="13" /> AI cố vấn từ hồ sơ mới nhất + kho nội bộ
+                </p>
+                <h3 className="font-display text-[20px] font-extrabold text-ink mt-1 leading-tight">Thay mặt Chú Triết, Huyền gợi ý hướng xử lý...</h3>
+                <p className="text-[12px] text-slate-500 mt-1.5 leading-relaxed">
+                  Huyền đang đọc bản lưu mới nhất của <b className="text-ink">{advisorCustomer.name}</b>, phản hồi khách hàng, lịch hẹn, trạng thái giao dịch và Kho kiến thức trong Cài đặt.
+                </p>
+              </div>
+              <button onClick={() => setAdvisorCustomer(null)} className="btn w-9 h-9 bg-paper text-slate-400 hover:text-crimson shrink-0"><I.X width="16" height="16" /></button>
+            </div>
+
+            <div className="spine bg-paper rounded-2xl p-4 pl-5 mb-4" style={{ '--spine': tone(advisorCustomer.status).spine }}>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-display text-[16px] font-extrabold text-ink mr-auto">{advisorCustomer.name}</p>
+                <Badge cls={tone(advisorCustomer.status).chip}>{advisorCustomer.status}</Badge>
+              </div>
+              <p className="text-[11.5px] text-slate-500 mt-1">
+                {advisorCustomer.contactPerson || 'Chưa khai người liên hệ'}
+                {advisorCustomer.province ? ` · ${advisorCustomer.province}` : ''}
+                {advisorCustomer.updatedAt ? ` · Bản lưu ${fbWhen(advisorCustomer.updatedAt)}` : ''}
+              </p>
+            </div>
+
+            {directAdvisorBusy && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-center fade-in">
+                <I.Loader width="22" height="22" className="animate-spin text-amber2 mx-auto" />
+                <p className="font-display text-[15px] font-extrabold text-ink mt-3">Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý...</p>
+                <p className="text-[11.5px] text-slate-500 mt-1">Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.</p>
+              </div>
+            )}
+
+            {directAdvisorError && !directAdvisorBusy && (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-[12px] font-semibold text-crimson">
+                {directAdvisorError}
+                <button onClick={rerunDirectAdvisor} className="btn w-full py-2.5 mt-3 bg-crimson text-white text-[11.5px]">Thử phân tích lại</button>
+              </div>
+            )}
+
+            {directAdvisorResult && !directAdvisorBusy && (
+              <div className="space-y-3 fade-in max-h-[70vh] overflow-y-auto pr-1">
+                <div className="rounded-2xl bg-white border border-amber-100 p-4">
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {directAdvisorResult.stage && <Badge cls="bg-violet-50 text-violet-700 border-violet-200">{directAdvisorResult.stage}</Badge>}
+                    {directAdvisorResult.priority && <Badge cls={directAdvisorResult.priority === 'Cao' ? 'bg-rose-50 text-rose-700 border-rose-200' : directAdvisorResult.priority === 'Thấp' ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-amber-50 text-amber-700 border-amber-200'}>Ưu tiên {directAdvisorResult.priority}</Badge>}
+                  </div>
+                  <p className="text-[13px] font-semibold text-ink leading-relaxed">{directAdvisorResult.situationSummary}</p>
+                  {directAdvisorResult.mainBarrier && <p className="text-[11.5px] text-slate-500 mt-2"><b className="text-ink">Rào cản chính:</b> {directAdvisorResult.mainBarrier}</p>}
+                </div>
+
+                {Array.isArray(directAdvisorResult.recommendedActions) && directAdvisorResult.recommendedActions.length > 0 && (
+                  <div>
+                    <p className="lbl">Hướng xử lý ưu tiên</p>
+                    <div className="space-y-2">
+                      {directAdvisorResult.recommendedActions.map((a, idx) => (
+                        <div key={idx} className="spine bg-white border border-line rounded-xl p-3.5 pl-5" style={{ '--spine':'#e08a1e' }}>
+                          <p className="text-[12.5px] font-extrabold text-ink">{a.step || idx+1}. {a.action}</p>
+                          {a.reason && <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed"><b>Lý do:</b> {a.reason}</p>}
+                          {a.goal && <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed"><b>Mục tiêu:</b> {a.goal}</p>}
+                          {a.suggestedScript && <div className="mt-2.5 rounded-lg bg-blue-50/70 px-3 py-2.5 text-[11.5px] text-brand leading-relaxed"><b>Gợi ý trao đổi:</b> “{a.suggestedScript}”</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid sm:grid-cols-2 gap-3">
+                  {Array.isArray(directAdvisorResult.opportunities) && directAdvisorResult.opportunities.length > 0 && (
+                    <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-3.5">
+                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-jade mb-2">Cơ hội</p>
+                      <ul className="space-y-1.5">{directAdvisorResult.opportunities.map((x,i)=><li key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</li>)}</ul>
+                    </div>
+                  )}
+                  {Array.isArray(directAdvisorResult.risks) && directAdvisorResult.risks.length > 0 && (
+                    <div className="rounded-xl bg-rose-50/70 border border-rose-100 p-3.5">
+                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-crimson mb-2">Rủi ro cần chú ý</p>
+                      <ul className="space-y-1.5">{directAdvisorResult.risks.map((x,i)=><li key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</li>)}</ul>
+                    </div>
+                  )}
+                </div>
+
+                {Array.isArray(directAdvisorResult.missingInfo) && directAdvisorResult.missingInfo.length > 0 && (
+                  <div className="rounded-xl bg-amber-50 border border-amber-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber2 mb-2">Thông tin cần khai thác thêm</p>
+                    <ul className="space-y-1.5">{directAdvisorResult.missingInfo.map((x,i)=><li key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</li>)}</ul>
+                  </div>
+                )}
+
+                {directAdvisorResult.managementSupport && (
+                  <div className="spine bg-white border border-line rounded-xl p-3.5 pl-5" style={{ '--spine':'#d8324b' }}>
+                    <p className="lbl mb-1">BGĐ nên hỗ trợ</p>
+                    <p className="text-[12px] text-ink leading-relaxed">{directAdvisorResult.managementSupport}</p>
+                  </div>
+                )}
+
+                {directAdvisorResult.nextFollowUp && (
+                  <div className="spine bg-white border border-line rounded-xl p-3.5 pl-5" style={{ '--spine':'#1d6fd0' }}>
+                    <p className="lbl mb-1">Theo dõi tiếp theo</p>
+                    <p className="text-[12px] text-ink leading-relaxed">{directAdvisorResult.nextFollowUp}</p>
+                  </div>
+                )}
+
+                {directAdvisorResult.finalAdvice && (
+                  <div className="rounded-2xl bg-ink text-white p-4 shadow-soft">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-blue-200 mb-1.5">Đề xuất tốt nhất</p>
+                    <p className="text-[13px] font-semibold leading-relaxed">{directAdvisorResult.finalAdvice}</p>
+                  </div>
+                )}
+
+                {Array.isArray(directAdvisorResult.knowledgeUsed) && directAdvisorResult.knowledgeUsed.length > 0 && (
+                  <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {directAdvisorResult.knowledgeUsed.join(' · ')}</div>
+                )}
+
+                <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-amber-50 text-amber2 border border-amber-100 text-[11.5px]">
+                  <I.Refresh width="14" height="14" /> Đọc lại dữ liệu mới nhất & phân tích lại
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
       <Modal open={!!quickReportCustomer} z={1080} max="max-w-lg" onClose={() => setQuickReportCustomer(null)}>
         {quickReportCustomer && (
           <div className="p-6 sm:p-7 flex flex-col max-h-[88vh]">
@@ -4000,13 +4581,107 @@ function Popups({
                 )}
               </div>
 
+              {quickReportCustomer.customerFeedback && (
+                <div>
+                  <p className="lbl">Khách hàng phản hồi</p>
+                  <div className="spine bg-amber-50/60 rounded-2xl p-4 pl-5" style={{ '--spine': '#e08a1e' }}>
+                    <p className="text-[13.5px] text-ink leading-relaxed whitespace-pre-line">{quickReportCustomer.customerFeedback}</p>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <p className="lbl">Nội dung báo cáo</p>
                 <div className="spine bg-violet-50/40 rounded-2xl p-4 pl-5" style={{ '--spine': '#6d4de0' }}>
                   <p className="text-[13.5px] text-ink leading-relaxed whitespace-pre-line">
                     {quickReportCustomer.report || 'Chưa có nội dung báo cáo.'}
                   </p>
+                  <p className="text-[10.5px] text-slate-400 mt-3 font-semibold">
+                    Bản lưu mới nhất: {quickReportCustomer.updatedAt ? fbWhen(quickReportCustomer.updatedAt) : 'Chưa xác định thời điểm'}
+                  </p>
                 </div>
+              </div>
+
+              {/* AI CO VAN XU LY KHACH HANG TU BAN LUU MOI NHAT + KHO NOI BO */}
+              <div className="rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50/80 to-white p-4">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 flex items-center gap-1.5">
+                      <I.Sparkles width="13" height="13" /> Thay mặt Chú Triết, Huyền gợi ý hướng xử lý
+                    </p>
+                    <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Phân tích bản lưu mới nhất và đối chiếu Kho kiến thức nội bộ trong Cài đặt.</p>
+                  </div>
+                </div>
+                <button onClick={runAdvisor} disabled={advisorBusy || !quickReportCustomer.report}
+                  className="btn w-full py-3.5 bg-violet2 text-white text-[12.5px] uppercase tracking-wide shadow-lift disabled:opacity-50">
+                  {advisorBusy ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Sparkles width="15" height="15" />}
+                  {advisorBusy ? 'Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý…' : 'Phân tích bản mới nhất & đề xuất xử lý'}
+                </button>
+
+                {advisorError && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-[11.5px] font-semibold text-crimson">{advisorError}</div>}
+
+                {advisorResult && (
+                  <div className="mt-4 space-y-3 fade-in">
+                    <div className="rounded-xl bg-white border border-violet-100 p-3.5">
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {advisorResult.stage && <Badge cls="bg-violet-50 text-violet-700 border-violet-200">{advisorResult.stage}</Badge>}
+                        {advisorResult.priority && <Badge cls={advisorResult.priority === 'Cao' ? 'bg-rose-50 text-rose-700 border-rose-200' : advisorResult.priority === 'Thấp' ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-amber-50 text-amber-700 border-amber-200'}>Ưu tiên {advisorResult.priority}</Badge>}
+                      </div>
+                      <p className="text-[13px] font-semibold text-ink leading-relaxed">{advisorResult.situationSummary}</p>
+                      {advisorResult.mainBarrier && <p className="text-[11.5px] text-slate-500 mt-2"><b className="text-ink">Rào cản chính:</b> {advisorResult.mainBarrier}</p>}
+                    </div>
+
+                    {Array.isArray(advisorResult.recommendedActions) && advisorResult.recommendedActions.length > 0 && (
+                      <div>
+                        <p className="lbl">Hướng xử lý ưu tiên</p>
+                        <div className="space-y-2">
+                          {advisorResult.recommendedActions.map((a, idx) => (
+                            <div key={idx} className="spine bg-white border border-line rounded-xl p-3.5 pl-5" style={{ '--spine':'#6d4de0' }}>
+                              <p className="text-[12.5px] font-extrabold text-ink">{a.step || idx+1}. {a.action}</p>
+                              {a.reason && <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed"><b>Lý do:</b> {a.reason}</p>}
+                              {a.goal && <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed"><b>Mục tiêu:</b> {a.goal}</p>}
+                              {a.suggestedScript && <div className="mt-2.5 rounded-lg bg-blue-50/70 px-3 py-2.5 text-[11.5px] text-brand leading-relaxed"><b>Gợi ý trao đổi:</b> “{a.suggestedScript}”</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {Array.isArray(advisorResult.opportunities) && advisorResult.opportunities.length > 0 && (
+                      <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-emerald-700 mb-2">Cơ hội</p>
+                        {advisorResult.opportunities.map((x,i)=><p key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</p>)}
+                      </div>
+                    )}
+                    {Array.isArray(advisorResult.risks) && advisorResult.risks.length > 0 && (
+                      <div className="rounded-xl bg-rose-50/70 border border-rose-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-crimson mb-2">Rủi ro cần chú ý</p>
+                        {advisorResult.risks.map((x,i)=><p key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</p>)}
+                      </div>
+                    )}
+                    {Array.isArray(advisorResult.missingInfo) && advisorResult.missingInfo.length > 0 && (
+                      <div className="rounded-xl bg-amber-50/70 border border-amber-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-amber-700 mb-2">Thông tin nên khai thác thêm</p>
+                        {advisorResult.missingInfo.map((x,i)=><p key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</p>)}
+                      </div>
+                    )}
+                    {advisorResult.managementSupport && (
+                      <div className="rounded-xl bg-slate-50 border border-line p-3.5 text-[11.5px] text-slate-600 leading-relaxed"><b className="text-ink">BGĐ nên hỗ trợ:</b> {advisorResult.managementSupport}</div>
+                    )}
+                    {advisorResult.nextFollowUp && (
+                      <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5 text-[11.5px] text-slate-600 leading-relaxed"><b className="text-brand">Theo dõi tiếp:</b> {advisorResult.nextFollowUp}</div>
+                    )}
+                    {Array.isArray(advisorResult.knowledgeUsed) && advisorResult.knowledgeUsed.length > 0 && (
+                      <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {advisorResult.knowledgeUsed.join(' · ')}</div>
+                    )}
+                    {advisorResult.finalAdvice && (
+                      <div className="spine rounded-xl bg-violet-100/60 p-3.5 pl-5" style={{ '--spine':'#6d4de0' }}>
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-violet2 mb-1">Đề xuất tốt nhất</p>
+                        <p className="text-[12.5px] font-bold text-ink leading-relaxed">{advisorResult.finalAdvice}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {(quickReportCustomer.appointments || []).length > 0 && (
