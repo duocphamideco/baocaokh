@@ -427,6 +427,223 @@ const isKeyCooling = (key) => (GEMINI_KEY_COOLDOWN.get(key) || 0) > Date.now();
 const KIE_TURBO_API_KEY = "6a11cd4b360b77e7cd515b8296a00e6a";
 const KIE_TURBO_ENDPOINT = 'https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:streamGenerateContent';
 
+/* ---------------- DEEPSEEK V4 FLASH — B.AI ----------------
+   Có thể được chọn làm AI CHÍNH trong Cài đặt. Không còn mặc định là AI dự phòng.
+*/
+const BAI_DEEPSEEK_ENDPOINT = 'https://api.b.ai/v1/chat/completions';
+const BAI_DEEPSEEK_MODEL = 'deepseek-v4-flash';
+const BAI_DEFAULT_API_KEY = 'sk-cgie46iv00dc3aqatqarqqx5zdb7z3n9';
+let BAI_DEEPSEEK_CONFIG = { enabled: true, apiKey: BAI_DEFAULT_API_KEY };
+const setBaiDeepSeekConfig = (v) => {
+  const obj = v && typeof v === 'object' ? v : {};
+  BAI_DEEPSEEK_CONFIG = {
+    enabled: typeof obj.enabled === 'boolean' ? obj.enabled : true,
+    apiKey: String(obj.apiKey || BAI_DEFAULT_API_KEY || '').trim()
+  };
+};
+
+/* ---------------- AI CHÍNH ĐANG SỬ DỤNG ---------------- */
+let PRIMARY_AI_PROVIDER = 'gemini';
+const setPrimaryAiProvider = (v) => {
+  PRIMARY_AI_PROVIDER = String(v || '').toLowerCase() === 'deepseek' ? 'deepseek' : 'gemini';
+};
+const getPrimaryAiProvider = () => PRIMARY_AI_PROVIDER;
+
+async function callPrimaryAI(prompt, { json = true, temperature = 0.25, maxTokens = 5000, model = 'gemini-3.6-flash', tools = null } = {}) {
+  if (tools) return callGemini(prompt, { model, json, tools, temperature });
+  if (getPrimaryAiProvider() === 'deepseek') {
+    try {
+      /* DeepSeek là AI chính nhưng chỉ thử 1 lần nhanh. Nếu lỗi thì chuyển NGAY sang Gemini
+         để người dùng không phải chờ nhiều vòng retry B.AI. */
+      const text = await callBaiDeepSeek(prompt, { json, temperature, maxTokens, fastFail: true });
+      try { window.__IDECO_PRIMARY_AI_ROUTE__ = { selected:'deepseek', used:'deepseek', fallback:false, at:Date.now() }; } catch (_) {}
+      return text;
+    } catch (deepErr) {
+      console.warn('[AI ROUTER] DeepSeek lỗi, chuyển ngay sang Gemini:', deepErr);
+      try {
+        window.__IDECO_PRIMARY_AI_ROUTE__ = {
+          selected:'deepseek', used:'gemini', fallback:true,
+          reason:String(deepErr?.message || deepErr), at:Date.now()
+        };
+      } catch (_) {}
+      /* callGemini đã có cơ chế tự luân chuyển các API Gemini 01/02/03. */
+      return callGemini(prompt, { model, json, temperature });
+    }
+  }
+  try { window.__IDECO_PRIMARY_AI_ROUTE__ = { selected:'gemini', used:'gemini', fallback:false, at:Date.now() }; } catch (_) {}
+  return callGemini(prompt, { model, json, temperature });
+}
+
+async function callBaiDeepSeek(prompt, { json = true, temperature = 0.25, maxTokens = 5000, fastFail = false } = {}) {
+  const cfg = BAI_DEEPSEEK_CONFIG || {};
+  const key = String(cfg.apiKey || '').trim();
+  if (!key) throw new Error('NO_BAI_KEY');
+
+  /* DeepSeek đã được chọn làm AI chính thì luôn được phép chạy.
+     Không để trạng thái enabled cũ từ Firebase chặn nhầm. */
+  if (!cfg.enabled && getPrimaryAiProvider() !== 'deepseek') throw new Error('BAI_DISABLED');
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const retryableStatus = (st) => st === 408 || st === 409 || st === 425 || st === 429 || st >= 500;
+
+  const makeBody = (stream) => {
+    const body = {
+      model: BAI_DEEPSEEK_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      stream: !!stream,
+      temperature,
+      max_tokens: maxTokens
+    };
+    if (json) body.response_format = { type: 'json_object' };
+    return body;
+  };
+
+  const fetchOnce = async ({ stream = false, authMode = 'bearer', timeoutMs = 65000 } = {}) => {
+    const ctl = new AbortController();
+    let timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const resetTimer = (ms = timeoutMs) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => ctl.abort(), ms);
+    };
+    try {
+      const headers = { 'Content-Type': 'application/json', 'Accept': stream ? 'text/event-stream' : 'application/json' };
+      if (authMode === 'x-api-key') headers['x-api-key'] = key;
+      else headers['Authorization'] = `Bearer ${key}`;
+
+      const res = await fetch(BAI_DEEPSEEK_ENDPOINT, {
+        method: 'POST', headers, body: JSON.stringify(makeBody(stream)), signal: ctl.signal
+      });
+
+      /* Auth lỗi: thử kiểu x-api-key ở tầng ngoài. */
+      if (!res.ok) return { res, text: '' };
+
+      if (!stream) {
+        resetTimer(70000);
+        const text = await res.text();
+        return { res, text };
+      }
+
+      /* STREAM FALLBACK: giữ kết nối sống bằng cách reset timeout mỗi khi nhận chunk.
+         Cách này ổn định hơn khi model cần thời gian suy luận dài. */
+      if (!res.body || !res.body.getReader) {
+        const text = await res.text();
+        return { res, text };
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder('utf-8');
+      let buf = '', answer = '';
+      resetTimer(45000);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        resetTimer(30000); // chỉ timeout nếu 30s không nhận thêm dữ liệu
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() || '';
+        for (const line0 of lines) {
+          const line = line0.trim();
+          if (!line || !line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(data);
+            const delta = obj?.choices?.[0]?.delta?.content;
+            const full = obj?.choices?.[0]?.message?.content;
+            if (typeof delta === 'string') answer += delta;
+            else if (typeof full === 'string') answer += full;
+          } catch (e) {}
+        }
+      }
+      if (buf.trim().startsWith('data:')) {
+        const data = buf.trim().slice(5).trim();
+        if (data && data !== '[DONE]') {
+          try {
+            const obj = JSON.parse(data);
+            const delta = obj?.choices?.[0]?.delta?.content;
+            const full = obj?.choices?.[0]?.message?.content;
+            if (typeof delta === 'string') answer += delta;
+            else if (typeof full === 'string') answer += full;
+          } catch (e) {}
+        }
+      }
+      return { res, text: answer.trim() };
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('BAI_TIMEOUT');
+      const err = new Error('BAI_NETWORK_OR_CORS');
+      err.cause = e;
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const parseAnswer = (text, streamMode) => {
+    if (!text) throw new Error('BAI_EMPTY');
+    if (streamMode) return String(text || '').trim();
+    let obj;
+    try { obj = JSON.parse(text); }
+    catch (e) { throw new Error('BAI_BAD_RESPONSE'); }
+    const answer = String(obj?.choices?.[0]?.message?.content || '').trim();
+    if (!answer) throw new Error('BAI_EMPTY');
+    return answer;
+  };
+
+  let lastErr = null;
+  const plans = fastFail
+    ? [
+        /* Khi DeepSeek là AI chính trong router: chỉ thử một lần để fallback sang Gemini ngay. */
+        { stream: false, timeoutMs: 22000, delay: 0 }
+      ]
+    : [
+        /* Nút kiểm tra DeepSeek / tác vụ gọi trực tiếp vẫn có thể dùng cơ chế phục hồi đầy đủ. */
+        { stream: false, timeoutMs: 65000, delay: 0 },
+        { stream: false, timeoutMs: 85000, delay: 1200 },
+        { stream: true,  timeoutMs: 60000, delay: 2800 }
+      ];
+
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i];
+    if (p.delay) await sleep(p.delay);
+    try {
+      let r = await fetchOnce({ stream: p.stream, authMode: 'bearer', timeoutMs: p.timeoutMs });
+      if (r.res.status === 401 || r.res.status === 403) {
+        r = await fetchOnce({ stream: p.stream, authMode: 'x-api-key', timeoutMs: p.timeoutMs });
+      }
+
+      if (!r.res.ok) {
+        let detail = '';
+        try { detail = (await r.res.text()).slice(0, 900); } catch (e) {}
+        const err = new Error(`BAI_HTTP_${r.res.status}${detail ? ' — ' + detail : ''}`);
+        err.status = r.res.status;
+        err.detail = detail;
+        lastErr = err;
+        /* Key/quyền sai thì retry không giúp; báo ngay. */
+        if (r.res.status === 401 || r.res.status === 403) throw err;
+        if (retryableStatus(r.res.status)) continue;
+        throw err;
+      }
+
+      const answer = parseAnswer(r.text, p.stream);
+      try {
+        window.__IDECO_BAI_LAST__ = {
+          model: BAI_DEEPSEEK_MODEL, at: Date.now(),
+          mode: p.stream ? 'stream-recovery' : 'non-stream', attempt: i + 1
+        };
+      } catch (e) {}
+      return answer;
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e && e.message || e);
+      /* Sai key/quyền/model/request thì không lặp vô ích. */
+      if (/BAI_HTTP_(400|401|403|404)/.test(msg)) throw e;
+      /* Network, timeout, 429, 5xx, response lỗi -> tự thử kế hoạch tiếp theo. */
+      if (i < plans.length - 1) continue;
+    }
+  }
+
+  throw lastErr || new Error('BAI_FAIL_AFTER_RETRY');
+}
+
 function extractKieGeminiText(payload) {
   const chunks = Array.isArray(payload) ? payload : [payload];
   let out = '';
@@ -634,7 +851,7 @@ async function analyzeAndRefineReport(text, customerFeedback = '') {
     }
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
+    const raw = await callPrimaryAI(prompt, { model: 'gemini-3.6-flash', json: true });
     const r = safeJson(raw, null);
     if (!r) return { status: 'warning', text, message: 'Lỗi xử lý dữ liệu AI.' };
     return { status: 'success', text: r.refinedText || text, message: r.advice || 'Đã chuẩn hóa văn bản.' };
@@ -692,7 +909,7 @@ Chỉ trả về JSON chuẩn theo cấu trúc:
   "qualityAdvice":""
 }`;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.1 });
+    const raw = await callPrimaryAI(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.1 });
     const r = safeJson(raw, null);
     if (!r || typeof r !== 'object') return empty;
     return {
@@ -728,7 +945,7 @@ async function searchCustomerInfo(inputData) {
     Trả về mảng JSON: [{"name":"","representative":"","phone":"","address":"","establishedYear":""}]
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
+    const raw = await callPrimaryAI(prompt, { model: 'gemini-3.6-flash', json: true });
     return safeJson(raw, []);
   } catch (e) { return []; }
 }
@@ -772,7 +989,7 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   /*
      V6.1 — ỔN ĐỊNH HUYỀN GỢI Ý
      - Hồ sơ "Không thành công / khách không hợp tác" vẫn được phân tích bình thường.
-     - Turbo lỗi / timeout / JSON lỗi -> TỰ ĐỘNG rơi về Gemini 3.6 + 3 API dự phòng.
+     - Turbo lỗi / timeout / JSON lỗi -> tự rơi về AI CHÍNH đã chọn trong Cài đặt (Gemini hoặc DeepSeek).
      - Giới hạn prompt để tránh hồ sơ dài làm request bị ngắt giữa chừng.
   */
   const clipText = (v, max) => {
@@ -901,40 +1118,44 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
     } catch (e) {
       turboFailed = true;
       turboError = e;
-      console.warn('[HUYEN TURBO] Kết nối/JSON lỗi, tự chuyển sang 3 API dự phòng:', e);
+      console.warn('[HUYEN TURBO] Kết nối/JSON lỗi, tự chuyển sang AI chính đã chọn:', e);
       try {
         window.__IDECO_HUYEN_TURBO_FALLBACK__ = { at: Date.now(), reason: String(e?.message || e) };
       } catch (_) {}
     }
   }
 
-  /* Chế độ thường, hoặc Turbo vừa lỗi: tự chạy Gemini 3.6 với cơ chế API 01 -> 02 -> 03. */
+  /* Chế độ thường, hoặc Turbo lỗi: chạy ĐÚNG AI CHÍNH đã chọn trong Cài đặt. */
+  const selectedProvider = getPrimaryAiProvider();
   if (!turbo || turboFailed) {
     try {
-      raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
-    } catch (normalErr) {
-      const err = new Error('HUYEN_ALL_AI_FAILED');
+      raw = await callPrimaryAI(prompt, { model: 'gemini-3.6-flash', json: true, temperature: selectedProvider === 'deepseek' ? 0.22 : 0.25, maxTokens: 5000 });
+    } catch (primaryErr) {
+      const primaryMsg = String(primaryErr?.message || primaryErr || 'UNKNOWN');
+      const err = new Error(`HUYEN_PRIMARY_AI_FAILED:${selectedProvider}:${primaryMsg}`);
       err.turboError = turboError;
-      err.normalError = normalErr;
+      err.primaryProvider = selectedProvider;
+      err.primaryError = primaryErr;
       throw err;
     }
   }
 
   let r = safeJson(raw, null);
   if (!r) {
-    /* Một lần sửa JSON nhẹ bằng chế độ thường; không gọi Turbo lần nữa để tránh lặp lỗi. */
-    const repairPrompt = `Hãy chuyển nội dung sau thành đúng JSON theo cấu trúc yêu cầu, không thêm markdown, không bịa dữ liệu:\n${clipText(raw, 12000)}`;
+    const repairPrompt = `Hãy chuyển nội dung sau thành đúng JSON theo cấu trúc yêu cầu, không thêm markdown, không bịa dữ liệu:
+${clipText(raw, 12000)}`;
     try {
-      const repaired = await callGemini(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.05 });
+      const repaired = await callPrimaryAI(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.05, maxTokens: 2500 });
       r = safeJson(repaired, null);
-    } catch (e) {}
+    } catch (_) {}
   }
   if (!r) throw new Error('AI_BAD_JSON');
 
-  /* Gắn metadata nội bộ, giao diện cũ bỏ qua nếu không dùng. */
   r._huyenMeta = {
     turboRequested: !!turbo,
     turboFallback: !!turboFailed,
+    primaryProvider: selectedProvider,
+    deepSeekUsed: (!turbo || turboFailed) && selectedProvider === 'deepseek',
     analyzedAt: Date.now()
   };
   return r;
@@ -1375,8 +1596,10 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
+  const [baiDeepSeekConfig, setBaiDeepSeekConfigState] = useState({ enabled: true, apiKey: BAI_DEFAULT_API_KEY });
+  const [primaryAiProvider, setPrimaryAiProviderState] = useState('gemini');
   /* BGĐ kiểm soát quyền dùng Huyền Turbo / credit qua Firebase */
-  const [turboControl, setTurboControl] = useState({ allowed: true, defaultOn: false, locked: false });
+  const [turboControl, setTurboControl] = useState({ allowed: true, defaultOn: false, locked: false, allowedDays: [0,1,2,3,4,5,6] });
 
   /* ---------- ui flow ---------- */
   const [view, setView] = useState('main');
@@ -1534,15 +1757,31 @@ function App() {
       };
       apply();
     });
+    const offBaiDeepSeek = dbOnValue('settings/baiDeepSeekConfig', (v) => {
+      const next = {
+        enabled: v && typeof v.enabled === 'boolean' ? v.enabled : true,
+        apiKey: String((v && v.apiKey) || BAI_DEFAULT_API_KEY || '').trim()
+      };
+      setBaiDeepSeekConfigState(next);
+      setBaiDeepSeekConfig(next);
+    });
+    const offPrimaryAi = dbOnValue('settings/primaryAiProvider', (v) => {
+      const provider = String((v && v.provider) || v || 'gemini').toLowerCase() === 'deepseek' ? 'deepseek' : 'gemini';
+      setPrimaryAiProviderState(provider);
+      setPrimaryAiProvider(provider);
+    });
     const offTurboControl = dbOnValue('settings/huyenTurboControl', (v) => {
       const next = {
         allowed: v && typeof v.allowed === 'boolean' ? v.allowed : true,
         defaultOn: v && typeof v.defaultOn === 'boolean' ? v.defaultOn : false,
-        locked: v && typeof v.locked === 'boolean' ? v.locked : false
+        locked: v && typeof v.locked === 'boolean' ? v.locked : false,
+        allowedDays: v && Array.isArray(v.allowedDays)
+          ? v.allowedDays.map(Number).filter(d => d >= 0 && d <= 6)
+          : [0,1,2,3,4,5,6]
       };
       setTurboControl(next);
     });
-    return () => { offStaff(); offCust(); offPass(); offKey(); offTurboControl(); };
+    return () => { offStaff(); offCust(); offPass(); offKey(); offBaiDeepSeek(); offPrimaryAi(); offTurboControl(); };
   }, []);
 
   /* Danh sach khach hang tu Excel: luu tren Firebase de moi may deu dung chung */
@@ -1989,18 +2228,82 @@ function App() {
     notify(count ? `Đã lưu ${count} API Gemini dự phòng — hệ thống sẽ tự chuyển khi key lỗi/hết quota` : 'Đã xóa các API key dự phòng', 'success');
   };
 
+  const handleSavePrimaryAiProvider = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const provider = document.querySelector('input[name="primaryAiProvider"]:checked')?.value === 'deepseek' ? 'deepseek' : 'gemini';
+
+    if (provider === 'deepseek') {
+      /* LỖI V9 đã sửa: khi chọn DeepSeek, lưu + kích hoạt key ngay trong cùng thao tác.
+         Không bắt người dùng phải bấm thêm nút "Lưu DeepSeek" trước. */
+      const key = (document.getElementById('baiDeepSeekKeyInput')?.value || baiDeepSeekConfig.apiKey || '').trim();
+      if (!key) { notify('Muốn chọn DeepSeek làm AI chính, hãy nhập API key B.AI trước.', 'warning'); return; }
+      const dsPayload = { enabled: true, apiKey: key, model: BAI_DEEPSEEK_MODEL, updatedAt: Date.now() };
+      const dsOk = await dbSet('settings/baiDeepSeekConfig', dsPayload);
+      if (!dsOk) { notify('Không lưu được API DeepSeek lên Firebase', 'error'); return; }
+      setBaiDeepSeekConfig(dsPayload);
+      setBaiDeepSeekConfigState(dsPayload);
+      const en = document.getElementById('baiDeepSeekEnabledInput');
+      if (en) en.checked = true;
+    }
+
+    const payload = { provider, updatedAt: Date.now() };
+    const ok = await dbSet('settings/primaryAiProvider', payload);
+    if (!ok) { notify('Không lưu được lựa chọn AI chính', 'error'); return; }
+    setPrimaryAiProviderState(provider);
+    setPrimaryAiProvider(provider);
+    notify(provider === 'deepseek' ? 'Đã kích hoạt DeepSeek V4 Flash làm AI chính của Huyền' : 'Đã chọn Gemini làm AI chính của Huyền', 'success', 4200);
+  };
+
+  const handleTestBaiDeepSeek = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const key = (document.getElementById('baiDeepSeekKeyInput')?.value || baiDeepSeekConfig.apiKey || '').trim();
+    if (!key) { notify('Hãy nhập API key B.AI trước khi kiểm tra.', 'warning'); return; }
+    const prevCfg = BAI_DEEPSEEK_CONFIG;
+    setBaiDeepSeekConfig({ enabled: true, apiKey: key });
+    try {
+      const raw = await callBaiDeepSeek('Chỉ trả về JSON chuẩn: {"ok":true,"message":"DeepSeek V4 Flash đã kết nối"}', { json: true, temperature: 0.05, maxTokens: 120 });
+      const t = safeJson(raw, null);
+      if (!t) throw new Error('BAI_TEST_BAD_JSON');
+      notify('DeepSeek V4 Flash kết nối thành công.', 'success', 5000);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (msg === 'BAI_NETWORK_OR_CORS') notify('DeepSeek đã tự thử lại nhưng vẫn mất kết nối. Có thể mạng/CORS đang chặn api.b.ai.', 'error', 7500);
+      else if (msg === 'BAI_TIMEOUT') notify('B.AI phản hồi quá chậm sau nhiều lần tự thử lại.', 'error', 6500);
+      else if (/BAI_HTTP_401|BAI_HTTP_403/.test(msg)) notify('B.AI từ chối API key hoặc tài khoản/model chưa có quyền.', 'error', 7000);
+      else if (/BAI_HTTP_429/.test(msg)) notify('B.AI đang giới hạn lượt gọi. Hãy thử lại sau.', 'warning', 6000);
+      else notify('DeepSeek chưa kết nối được: ' + msg.slice(0,180), 'error', 7000);
+    } finally {
+      /* Giữ key đang nhập để người dùng có thể lưu ngay; không quay lại cấu hình cũ nếu key hợp lệ cần thử tiếp. */
+      if (!key) setBaiDeepSeekConfig(prevCfg);
+    }
+  };
+
+  const handleSaveBaiDeepSeek = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const apiKey = (document.getElementById('baiDeepSeekKeyInput')?.value || '').trim();
+    const enabled = !!document.getElementById('baiDeepSeekEnabledInput')?.checked;
+    if (enabled && !apiKey) { notify('Hãy nhập API key B.AI trước khi bật DeepSeek V4 Flash', 'warning'); return; }
+    const payload = { enabled, apiKey, model: BAI_DEEPSEEK_MODEL, updatedAt: Date.now() };
+    const ok = await dbSet('settings/baiDeepSeekConfig', payload);
+    if (!ok) { notify('Không lưu được cấu hình DeepSeek V4 Flash', 'error'); return; }
+    setBaiDeepSeekConfigState(payload);
+    setBaiDeepSeekConfig(payload);
+    notify(enabled ? 'Đã lưu và cho phép sử dụng DeepSeek V4 Flash' : 'Đã tắt quyền sử dụng DeepSeek V4 Flash', 'success', 4200);
+  };
+
   const handleSaveTurboControl = async () => {
     if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
     const allowed = !!document.getElementById('turboAllowedInput')?.checked;
     const defaultOn = !!document.getElementById('turboDefaultOnInput')?.checked;
     const locked = !!document.getElementById('turboLockedInput')?.checked;
-    const payload = { allowed, defaultOn: allowed ? defaultOn : false, locked, updatedAt: Date.now() };
+    const allowedDays = [0,1,2,3,4,5,6].filter(d => !!document.getElementById(`turboDay_${d}`)?.checked);
+    const payload = { allowed, defaultOn: allowed ? defaultOn : false, locked, allowedDays, updatedAt: Date.now() };
     const ok = await dbSet('settings/huyenTurboControl', payload);
     if (!ok) { notify('Không lưu được thiết lập Huyền Turbo', 'error'); return; }
     setTurboControl(payload);
     notify(locked
-      ? `Đã khóa Huyền Turbo theo thiết lập BGĐ: ${payload.defaultOn ? 'BẬT' : 'TẮT'}`
-      : `Đã lưu quyền Huyền Turbo: ${allowed ? 'cho phép nhân viên bật/tắt' : 'không cho phép sử dụng'}`, 'success', 4800);
+      ? `Đã khóa Huyền Turbo theo thiết lập BGĐ: ${payload.defaultOn ? 'BẬT' : 'TẮT'} · ${allowedDays.length}/7 ngày được phép`
+      : `Đã lưu quyền Huyền Turbo: ${allowed ? 'cho phép theo lịch ngày đã chọn' : 'không cho phép sử dụng'} · ${allowedDays.length}/7 ngày`, 'success', 4800);
   };
 
   const handleConfirmAlert = async () => {
@@ -4091,6 +4394,37 @@ function App() {
                 </section>
 
                 {/* AI key */}
+                {/* AI CHÍNH — chọn Gemini hoặc DeepSeek */}
+                <section className="bg-white border-2 border-brand/20 rounded-2xl p-5 sm:p-7">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-blue-50 text-brand flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
+                    <div>
+                      <h3 className="font-display text-[17px] font-extrabold text-ink">AI chính đang sử dụng</h3>
+                      <p className="text-[11px] text-slate-400 font-semibold">Chọn engine Huyền dùng trực tiếp khi Turbo tắt</p>
+                    </div>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                    <label className={`rounded-2xl border p-4 cursor-pointer transition ${primaryAiProvider === 'gemini' ? 'border-violet-300 bg-violet-50' : 'border-line bg-paper'}`}>
+                      <div className="flex items-start gap-3">
+                        <input type="radio" name="primaryAiProvider" value="gemini" checked={primaryAiProvider === 'gemini'} onChange={() => setPrimaryAiProviderState('gemini')} className="mt-1 w-4 h-4 accent-violet-600" />
+                        <div><p className="text-[13px] font-extrabold text-ink">Gemini</p><p className="text-[10.5px] text-slate-500 mt-1 leading-relaxed">Dùng trực tiếp Gemini và tự luân chuyển API 01/02/03.</p></div>
+                      </div>
+                    </label>
+                    <label className={`rounded-2xl border p-4 cursor-pointer transition ${primaryAiProvider === 'deepseek' ? 'border-cyan-300 bg-cyan-50' : 'border-line bg-paper'}`}>
+                      <div className="flex items-start gap-3">
+                        <input type="radio" name="primaryAiProvider" value="deepseek" checked={primaryAiProvider === 'deepseek'} onChange={() => setPrimaryAiProviderState('deepseek')} className="mt-1 w-4 h-4 accent-cyan-700" />
+                        <div><p className="text-[13px] font-extrabold text-ink">DeepSeek V4 Flash</p><p className="text-[10.5px] text-slate-500 mt-1 leading-relaxed">Dùng trực tiếp B.AI. Không chờ Gemini lỗi mới gọi.</p></div>
+                      </div>
+                    </label>
+                  </div>
+                  <div className="rounded-xl bg-blue-50 border border-blue-100 px-3.5 py-3 text-[11px] text-blue-800 leading-relaxed mb-4">
+                    Hiện tại: <b>{primaryAiProvider === 'deepseek' ? 'DeepSeek V4 Flash' : 'Gemini'}</b>. Nếu chọn DeepSeek mà kết nối lỗi, Huyền sẽ chuyển ngay sang Gemini để không gián đoạn. Turbo là chế độ riêng.
+                  </div>
+                  <button onClick={handleSavePrimaryAiProvider} className="btn w-full py-3.5 bg-brand text-white text-[13px] uppercase tracking-wider shadow-lift">
+                    <I.Save width="16" height="16" /> Lưu lựa chọn AI chính lên Firebase
+                  </button>
+                </section>
+
                 <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
                   <div className="flex items-center gap-3 mb-2">
                     <div className="w-10 h-10 rounded-xl bg-violet-50 text-violet2 flex items-center justify-center"><I.Key width="18" height="18" /></div>
@@ -4122,6 +4456,43 @@ function App() {
                   </div>
                 </section>
 
+                {/* DEEPSEEK V4 FLASH — B.AI */}
+                <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
+                    <div>
+                      <h3 className="font-display text-[17px] font-extrabold text-ink">DeepSeek V4 Flash</h3>
+                      <p className="text-[11px] text-slate-400 font-semibold">B.AI · model deepseek-v4-flash · có thể chọn làm AI chính</p>
+                    </div>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
+                    Khi chọn DeepSeek V4 Flash ở mục “AI chính đang sử dụng”, Huyền sẽ gọi trực tiếp B.AI cho các tác vụ phân tích. DeepSeek không còn chỉ là đường dự phòng.
+                  </p>
+                  <div className="space-y-3">
+                    <Field label="API KEY B.AI">
+                      <input id="baiDeepSeekKeyInput" type="password" defaultValue={baiDeepSeekConfig.apiKey || ''} placeholder="sk-..." className="fld font-mono text-[13px]" autoComplete="off" />
+                    </Field>
+                    <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-ink">Cho phép sử dụng DeepSeek V4 Flash</span>
+                        <span className="block text-[10.5px] text-slate-400 mt-0.5">Tắt để khóa hoàn toàn việc gọi B.AI, kể cả khi DeepSeek đang được chọn làm AI chính.</span>
+                      </span>
+                      <input id="baiDeepSeekEnabledInput" type="checkbox" defaultChecked={baiDeepSeekConfig.enabled} className="w-5 h-5 accent-cyan-600" />
+                    </label>
+                    <div className="rounded-xl bg-cyan-50 border border-cyan-100 px-3.5 py-3 text-[10.8px] text-cyan-800 leading-relaxed">
+                      Endpoint: <b>api.b.ai/v1/chat/completions</b> · khi DeepSeek được chọn làm AI chính: thử 1 lần, nếu lỗi sẽ <b>chuyển ngay sang Gemini + API 01/02/03</b> · model cố định <b>deepseek-v4-flash</b>.
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-2">
+                      <button onClick={handleTestBaiDeepSeek} className="btn w-full py-3.5 bg-cyan-50 text-cyan-800 border border-cyan-200 text-[12px] uppercase tracking-wider">
+                        <I.Refresh width="15" height="15" /> Kiểm tra kết nối DeepSeek
+                      </button>
+                      <button onClick={handleSaveBaiDeepSeek} className="btn w-full py-3.5 bg-cyan-700 text-white text-[12px] uppercase tracking-wider shadow-lift">
+                        <I.Save width="16" height="16" /> Lưu DeepSeek lên Firebase
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
                 {/* HUYỀN TURBO — kiểm soát credit từ Cài đặt */}
                 <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
                   <div className="flex items-center gap-3 mb-2">
@@ -4132,7 +4503,7 @@ function App() {
                     </div>
                   </div>
                   <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
-                    Ban Giám đốc có thể cho phép/tắt Turbo, chọn trạng thái mặc định và khóa nút bên ngoài. Khi khóa, nhân viên không thể tự thay đổi trạng thái Turbo.
+                    Ban Giám đốc có thể cho phép/tắt Turbo, chọn các ngày trong tuần được sử dụng, chọn trạng thái mặc định và khóa nút bên ngoài. Ngày không được chọn, Turbo tự khóa để kiểm soát credit.
                   </p>
                   <div className="space-y-3">
                     <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
@@ -4149,6 +4520,22 @@ function App() {
                       </span>
                       <input id="turboDefaultOnInput" type="checkbox" defaultChecked={turboControl.defaultOn} className="w-5 h-5 accent-amber-500" />
                     </label>
+                    <div className="bg-amber-50/60 border border-amber-100 rounded-2xl p-4">
+                      <div className="mb-3">
+                        <span className="block text-[12.5px] font-extrabold text-ink">Ngày trong tuần được phép dùng Turbo</span>
+                        <span className="block text-[10.5px] text-slate-500 mt-0.5">Chỉ những ngày được chọn thì nút Huyền Turbo bên ngoài mới hoạt động. Dùng để giới hạn credit theo lịch BGĐ.</span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {[
+                          [1,'Thứ 2'],[2,'Thứ 3'],[3,'Thứ 4'],[4,'Thứ 5'],[5,'Thứ 6'],[6,'Thứ 7'],[0,'Chủ nhật']
+                        ].map(([d,label]) => (
+                          <label key={d} className="flex items-center gap-2 bg-white border border-amber-100 rounded-xl px-3 py-2.5 cursor-pointer text-[11.5px] font-bold text-slate-600">
+                            <input id={`turboDay_${d}`} type="checkbox" defaultChecked={(turboControl.allowedDays || [0,1,2,3,4,5,6]).includes(d)} className="w-4 h-4 accent-amber-500" />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
                     <label className="flex items-center justify-between gap-3 bg-rose-50/60 border border-rose-100 rounded-2xl px-4 py-3 cursor-pointer">
                       <span>
                         <span className="block text-[12.5px] font-extrabold text-crimson">Khóa nút Turbo ngoài giao diện</span>
@@ -4156,6 +4543,10 @@ function App() {
                       </span>
                       <input id="turboLockedInput" type="checkbox" defaultChecked={turboControl.locked} className="w-5 h-5 accent-rose-500" />
                     </label>
+                    <div className="rounded-xl bg-paper px-3.5 py-3 text-[10.8px] text-slate-500 leading-relaxed">
+                      Lịch đang lưu: <b className="text-ink">{(turboControl.allowedDays || [0,1,2,3,4,5,6]).map(d => ['CN','T2','T3','T4','T5','T6','T7'][d]).join(', ') || 'Không ngày nào'}</b>.
+                      Hôm nay: <b className={(turboControl.allowedDays || [0,1,2,3,4,5,6]).includes(new Date().getDay()) ? 'text-jade' : 'text-crimson'}>{['Chủ nhật','Thứ 2','Thứ 3','Thứ 4','Thứ 5','Thứ 6','Thứ 7'][new Date().getDay()]}</b>.
+                    </div>
                     <button onClick={handleSaveTurboControl} className="btn w-full py-3.5 bg-amber2 text-white text-[13px] uppercase tracking-wider shadow-lift">
                       <I.Save width="16" height="16" /> Lưu kiểm soát Huyền Turbo
                     </button>
@@ -4448,7 +4839,11 @@ function Popups({
   const [advisorError, setAdvisorError] = useState('');
 
   /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng; quyền dùng do BGĐ kiểm soát trong Cài đặt. */
-  const turboPolicy = turboControl || { allowed: true, defaultOn: false, locked: false };
+  const turboPolicy = turboControl || { allowed: true, defaultOn: false, locked: false, allowedDays: [0,1,2,3,4,5,6] };
+  const turboDayNames = ['Chủ nhật','Thứ 2','Thứ 3','Thứ 4','Thứ 5','Thứ 6','Thứ 7'];
+  const turboToday = new Date().getDay();
+  const turboAllowedDays = Array.isArray(turboPolicy.allowedDays) ? turboPolicy.allowedDays : [0,1,2,3,4,5,6];
+  const turboTodayAllowed = !!turboPolicy.allowed && turboAllowedDays.includes(turboToday);
   const [huyenTurbo, setHuyenTurbo] = useState(() => {
     try { return sessionStorage.getItem('ideco_huyen_turbo') === '1'; } catch (e) { return false; }
   });
@@ -4457,7 +4852,7 @@ function Popups({
 
   /* Đồng bộ quyền: bị chặn -> luôn tắt; bị khóa -> luôn theo trạng thái BGĐ; chưa khóa -> người dùng được tự chọn. */
   useEffect(() => {
-    if (!turboPolicy.allowed) {
+    if (!turboPolicy.allowed || !turboTodayAllowed) {
       setHuyenTurbo(false);
       try { sessionStorage.setItem('ideco_huyen_turbo', '0'); } catch (e) {}
       return;
@@ -4466,11 +4861,15 @@ function Popups({
       setHuyenTurbo(!!turboPolicy.defaultOn);
       try { sessionStorage.setItem('ideco_huyen_turbo', turboPolicy.defaultOn ? '1' : '0'); } catch (e) {}
     }
-  }, [turboPolicy.allowed, turboPolicy.defaultOn, turboPolicy.locked]);
+  }, [turboPolicy.allowed, turboPolicy.defaultOn, turboPolicy.locked, turboTodayAllowed]);
 
   const toggleHuyenTurbo = () => {
     if (!turboPolicy.allowed) {
       notify && notify('Huyền Turbo đang được BGĐ tắt trong Cài đặt để kiểm soát credit.', 'warning', 4600);
+      return;
+    }
+    if (!turboTodayAllowed) {
+      notify && notify(`Huyền Turbo hôm nay (${turboDayNames[turboToday]}) chưa được BGĐ cho phép sử dụng.`, 'warning', 5200);
       return;
     }
     if (turboPolicy.locked) {
@@ -4527,8 +4926,13 @@ function Popups({
         if (cancelled) return;
         const msg = String(e && e.message || e);
         setDirectAdvisorError(huyenTurbo
-          ? 'Huyền đã thử Turbo và tự chuyển qua API dự phòng nhưng vẫn chưa kết nối được. Bạn thử lại sau ít phút.'
-          : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : 'Huyền đã thử các API dự phòng nhưng chưa phân tích được hồ sơ này. Bạn thử lại sau ít phút.'));
+          ? 'Huyền đã thử Turbo và tự chuyển qua AI chính nhưng vẫn chưa kết nối được. Bạn thử lại sau ít phút.'
+          : (msg.includes('BAI_NETWORK_OR_CORS') ? 'DeepSeek không kết nối được từ trình duyệt (mạng/CORS). Vào Cài đặt → Kiểm tra kết nối DeepSeek để xem lỗi.'
+            : msg.includes('BAI_HTTP_401') || msg.includes('BAI_HTTP_403') ? 'DeepSeek từ chối API key hoặc tài khoản/model chưa có quyền.'
+            : msg.includes('BAI_HTTP_429') ? 'DeepSeek đang bị giới hạn lượt gọi. Hãy thử lại sau.'
+            : msg.includes('NO_BAI_KEY') ? 'Chưa có API key DeepSeek/B.AI. Vào Cài đặt để nhập key.'
+            : msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API.'
+            : 'Huyền chưa phân tích được hồ sơ này. Hãy vào Cài đặt → Kiểm tra kết nối DeepSeek để xem lỗi thật.'));
       } finally { if (!cancelled) setDirectAdvisorBusy(false); }
     };
     run();
@@ -4545,7 +4949,7 @@ function Popups({
       const msg = String(e && e.message || e);
       setDirectAdvisorError(huyenTurbo
         ? 'Huyền Turbo chưa kết nối được Kie.ai Turbo 3.7 Flash. Huyền sẽ tự chuyển sang chế độ thường và các API dự phòng; bạn cũng có thể thử lại sau.'
-        : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
+        : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : (msg.includes('BAI_NETWORK_OR_CORS') ? 'DeepSeek không kết nối được từ trình duyệt (mạng/CORS). Vào Cài đặt → Kiểm tra kết nối DeepSeek để xem lỗi.' : msg.includes('BAI_HTTP_401') || msg.includes('BAI_HTTP_403') ? 'DeepSeek từ chối API key hoặc quyền truy cập model. Hãy kiểm tra key B.AI.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.')));
     } finally { setDirectAdvisorBusy(false); }
   };
 
@@ -4760,9 +5164,10 @@ function Popups({
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${huyenTurbo ? 'bg-amber2 text-white shadow-lift' : 'bg-paper text-slate-400'}`}>⚡</div>
                 <div className="min-w-0 mr-auto">
                   <p className="font-display text-[13.5px] font-extrabold text-ink">Huyền Turbo</p>
-                  <p className="text-[10.5px] text-slate-500 mt-0.5">{!turboPolicy.allowed ? 'TẮT bởi BGĐ · kiểm soát credit' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · BGĐ đã khóa trạng thái` : (huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng')}</p>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">{!turboPolicy.allowed ? 'TẮT bởi BGĐ · kiểm soát credit' : !turboTodayAllowed ? `KHÓA HÔM NAY · ${turboDayNames[turboToday]}` : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · BGĐ đã khóa trạng thái` : (huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng')}</p>
+                  <p className="text-[9.8px] text-slate-400 mt-1">Lịch BGĐ: {turboAllowedDays.length ? turboAllowedDays.map(d => ['CN','T2','T3','T4','T5','T6','T7'][d]).join(', ') : 'Không ngày nào được phép'}</p>
                 </div>
-                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`} aria-label="Bật hoặc tắt Huyền Turbo">
+                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || !turboTodayAllowed || turboPolicy.locked} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'} ${(!turboPolicy.allowed || !turboTodayAllowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`} aria-label="Bật hoặc tắt Huyền Turbo">
                   <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow transition-all ${huyenTurbo ? 'left-8' : 'left-1'}`}></span>
                 </button>
               </div>
@@ -5017,8 +5422,8 @@ function Popups({
                     <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Phân tích bản lưu mới nhất và đối chiếu Kho kiến thức nội bộ trong Cài đặt.</p>
                   </div>
                 </div>
-                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`}>
-                  ⚡ Huyền Turbo: {!turboPolicy.allowed ? 'BGĐ ĐÃ TẮT' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · ĐÃ KHÓA` : (huyenTurbo ? 'BẬT · Turbo 3.7 Flash' : 'TẮT')}
+                <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || !turboTodayAllowed || turboPolicy.locked} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'} ${(!turboPolicy.allowed || !turboTodayAllowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                  ⚡ Huyền Turbo: {!turboPolicy.allowed ? 'BGĐ ĐÃ TẮT' : !turboTodayAllowed ? `KHÓA HÔM NAY · ${turboDayNames[turboToday]}` : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · ĐÃ KHÓA` : (huyenTurbo ? 'BẬT · Turbo 3.7 Flash' : 'TẮT')}
                 </button>
                 {turboNotice && huyenTurbo && <div className="mb-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-[10.8px] font-semibold text-amber-800 leading-relaxed">Huyền đang ráng hết sức để phản hồi bạn nhé — tuy nhiên nhấn nút này Huyền hơi bị mệt tí, tốn tiền tí nhưng sẽ áp dụng nhé.</div>}
                 <button onClick={runAdvisor} disabled={advisorBusy || !quickReportCustomer.report}
