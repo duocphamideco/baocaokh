@@ -812,73 +812,207 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   if (!customer) throw new Error('NO_CUSTOMER');
 
   /*
-     V6.1 — ỔN ĐỊNH HUYỀN GỢI Ý
-     - Hồ sơ "Không thành công / khách không hợp tác" vẫn được phân tích bình thường.
-     - Turbo lỗi / timeout / JSON lỗi -> TỰ ĐỘNG rơi về Gemini 3.6 + 3 API dự phòng.
-     - Giới hạn prompt để tránh hồ sơ dài làm request bị ngắt giữa chừng.
+     HUYỀN SMART TIMELINE V2
+     - Không tăng thêm một lượt gọi AI: vẫn chỉ 1 lượt phân tích chính (Turbo hoặc AI thường).
+     - Tính trước mốc thời gian bằng JavaScript để AI không phải tự đoán ngày/thời lượng.
+     - Nhận diện tín hiệu từ chối / trì hoãn / yêu cầu thương lượng trước khi gửi AI.
+     - Xếp hạng Kho kiến thức theo mức liên quan để giảm nhiễu và tiết kiệm token.
+     - Buộc AI đưa ra chiến lược chốt hợp tác, xử lý phản đối và giới hạn thẩm quyền rõ ràng.
   */
   const clipText = (v, max) => {
     const t = String(v || '').trim();
     return t.length > max ? t.slice(0, max) + '\n[Đã lược bớt phần quá dài, ưu tiên dữ liệu mới nhất]' : t;
   };
 
-  /* Luôn đọc kho kiến thức mới nhất; Firebase lỗi thì vẫn cho AI phân tích hồ sơ, không chặn toàn bộ. */
-  let kbRaw = null;
-  try { kbRaw = await dbGet('settings/aiHandlingKnowledge'); } catch (e) { kbRaw = null; }
-  const kb = normalizeKnowledgeEntries(kbRaw);
-  let knowledgeText = kb.map((x, i) => `\n[Tình huống nội bộ ${i+1}]\nTiêu đề: ${clipText(x.title, 250)}\nNội dung:\n${clipText(x.content, 6500)}`).join('\n');
-  if (knowledgeText.length > 32000) knowledgeText = knowledgeText.slice(0, 32000) + '\n[Đã lược bớt Kho kiến thức để kết nối ổn định]';
+  const foldVN = (v) => String(v || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd').replace(/Đ/g, 'D')
+    .toLowerCase();
 
-  /* Chỉ lấy tối đa 20 lịch hẹn gần nhất để prompt không phình lớn. */
-  const appts = (Array.isArray(customer.appointments) ? customer.appointments : []).slice(-20).map(a => ({
-    date: a?.date || '', time: a?.time || '', content: clipText(a?.content, 800), isCompleted: !!a?.isCompleted
-  }));
-  let savedAt = '';
-  try { savedAt = customer.updatedAt ? new Date(customer.updatedAt).toISOString() : ''; } catch (e) { savedAt = ''; }
-
-  /* Phân tích vòng đời giao dịch từ ngày bắt đầu tới lần cập nhật/lịch hẹn mới nhất. */
   const today = new Date();
   const parseLocalDate = (v, time = '12:00') => {
     if (!v) return null;
     const d = new Date(`${v}T${time || '12:00'}:00`);
     return Number.isNaN(d.getTime()) ? null : d;
   };
-  const startDateObj = parseLocalDate(customer.transactionDate);
-  const appointmentTimeline = appts.map(a => ({ ...a, _d: parseLocalDate(a.date, a.time || '12:00') })).filter(a => a._d);
-  appointmentTimeline.sort((a,b) => a._d - b._d);
-  const latestAppointment = appointmentTimeline.length ? appointmentTimeline[appointmentTimeline.length - 1] : null;
-  const latestCompletedAppointment = [...appointmentTimeline].reverse().find(a => a.isCompleted) || null;
-  const latestOpenAppointment = [...appointmentTimeline].reverse().find(a => !a.isCompleted) || null;
-  const updatedObj = customer.updatedAt ? new Date(customer.updatedAt) : null;
-  const validUpdatedObj = updatedObj && !Number.isNaN(updatedObj.getTime()) ? updatedObj : null;
-  const latestTouchObj = [validUpdatedObj, latestAppointment?._d, startDateObj].filter(Boolean).sort((a,b) => b-a)[0] || today;
-  const daysFromStart = startDateObj ? Math.max(0, Math.floor((today - startDateObj) / 86400000)) : null;
-  const daysSinceLatestTouch = latestTouchObj ? Math.max(0, Math.floor((today - latestTouchObj) / 86400000)) : null;
-  const latestOpenIsOverdue = !!(latestOpenAppointment && latestOpenAppointment._d < today);
-  const timelineSummary = {
-    today: getLocalDateString(today),
-    startDate: customer.transactionDate || '',
-    daysFromStart,
-    lastSavedAt: savedAt,
-    daysSinceLatestTouch,
-    latestAppointment: latestAppointment ? { date: latestAppointment.date, time: latestAppointment.time, content: latestAppointment.content, isCompleted: latestAppointment.isCompleted } : null,
-    latestCompletedAppointment: latestCompletedAppointment ? { date: latestCompletedAppointment.date, time: latestCompletedAppointment.time, content: latestCompletedAppointment.content } : null,
-    latestOpenAppointment: latestOpenAppointment ? { date: latestOpenAppointment.date, time: latestOpenAppointment.time, content: latestOpenAppointment.content, overdue: latestOpenIsOverdue } : null
+  const dayDiff = (later, earlier) => {
+    if (!later || !earlier) return null;
+    return Math.max(0, Math.floor((later.getTime() - earlier.getTime()) / 86400000));
+  };
+  const signedDayDiff = (later, earlier) => {
+    if (!later || !earlier) return null;
+    return Math.round((later.getTime() - earlier.getTime()) / 86400000);
   };
 
+  /* ---------- 1) DỰNG TIMELINE CHÍNH XÁC TỪ DỮ LIỆU CÓ THẬT ---------- */
+  const appts = (Array.isArray(customer.appointments) ? customer.appointments : []).slice(-30).map(a => ({
+    date: a?.date || '',
+    time: a?.time || '',
+    content: clipText(a?.content, 1000),
+    isCompleted: !!a?.isCompleted
+  }));
+
+  let savedAt = '';
+  let validUpdatedObj = null;
+  try {
+    validUpdatedObj = customer.updatedAt ? new Date(customer.updatedAt) : null;
+    if (validUpdatedObj && !Number.isNaN(validUpdatedObj.getTime())) savedAt = validUpdatedObj.toISOString();
+    else validUpdatedObj = null;
+  } catch (e) { validUpdatedObj = null; }
+
+  const startDateObj = parseLocalDate(customer.transactionDate);
+  const appointmentTimeline = appts
+    .map(a => ({ ...a, _d: parseLocalDate(a.date, a.time || '12:00') }))
+    .filter(a => a._d)
+    .sort((a,b) => a._d - b._d);
+
+  const completedAppointments = appointmentTimeline.filter(a => a.isCompleted && a._d <= today);
+  const openAppointments = appointmentTimeline.filter(a => !a.isCompleted);
+  const overdueAppointments = openAppointments.filter(a => a._d < today);
+  const upcomingAppointments = openAppointments.filter(a => a._d >= today);
+
+  const latestAppointment = appointmentTimeline.length ? appointmentTimeline[appointmentTimeline.length - 1] : null;
+  const latestCompletedAppointment = completedAppointments.length ? completedAppointments[completedAppointments.length - 1] : null;
+  const latestOverdueAppointment = overdueAppointments.length ? overdueAppointments[overdueAppointments.length - 1] : null;
+  const nextOpenAppointment = upcomingAppointments.length ? upcomingAppointments[0] : null;
+
+  /* Điểm hoạt động của hồ sơ: chỉ lấy dữ liệu đã xảy ra, không lấy lịch hẹn tương lai làm “lần chạm gần nhất”. */
+  const pastRecordPoints = [startDateObj, validUpdatedObj, ...completedAppointments.map(a => a._d)]
+    .filter(d => d && d <= today)
+    .sort((a,b) => a - b);
+  const latestRecordActivity = pastRecordPoints.length ? pastRecordPoints[pastRecordPoints.length - 1] : null;
+
+  const gaps = [];
+  for (let i = 1; i < pastRecordPoints.length; i++) {
+    const g = dayDiff(pastRecordPoints[i], pastRecordPoints[i-1]);
+    if (g !== null) gaps.push(g);
+  }
+  const maxGapDays = gaps.length ? Math.max(...gaps) : null;
+  const avgGapDays = gaps.length ? Math.round((gaps.reduce((s,x)=>s+x,0) / gaps.length) * 10) / 10 : null;
+
+  const daysFromStart = startDateObj ? dayDiff(today, startDateObj) : null;
+  const daysSinceRecordActivity = latestRecordActivity ? dayDiff(today, latestRecordActivity) : null;
+  const overdueDays = latestOverdueAppointment ? dayDiff(today, latestOverdueAppointment._d) : null;
+  const daysUntilNextAppointment = nextOpenAppointment ? Math.max(0, signedDayDiff(nextOpenAppointment._d, today)) : null;
+
+  const timelineSummary = {
+    nowLocal: today.toString(),
+    today: getLocalDateString(today),
+    transactionStartDate: customer.transactionDate || '',
+    recordAgeDays: daysFromStart,
+    lastSavedAt: savedAt,
+    daysSinceLastRecordActivity: daysSinceRecordActivity,
+    appointmentCounts: {
+      total: appointmentTimeline.length,
+      completed: completedAppointments.length,
+      open: openAppointments.length,
+      overdue: overdueAppointments.length,
+      upcoming: upcomingAppointments.length
+    },
+    latestCompletedAppointment: latestCompletedAppointment ? {
+      date: latestCompletedAppointment.date, time: latestCompletedAppointment.time,
+      content: latestCompletedAppointment.content
+    } : null,
+    latestOverdueAppointment: latestOverdueAppointment ? {
+      date: latestOverdueAppointment.date, time: latestOverdueAppointment.time,
+      content: latestOverdueAppointment.content, overdueDays
+    } : null,
+    nextOpenAppointment: nextOpenAppointment ? {
+      date: nextOpenAppointment.date, time: nextOpenAppointment.time,
+      content: nextOpenAppointment.content, daysUntil: daysUntilNextAppointment
+    } : null,
+    cadence: {
+      recordPoints: pastRecordPoints.length,
+      averageGapDays: avgGapDays,
+      maxGapDays
+    }
+  };
+
+  /* ---------- 2) NHẬN DIỆN TÍN HIỆU THƯƠNG MẠI TRƯỚC KHI GỬI AI ---------- */
   const statusText = String(customer.status || '').trim();
-  const isNotSuccessful = /không thành công|không hợp tác|từ chối/i.test(statusText + ' ' + String(customer.customerFeedback || '') + ' ' + String(customer.report || ''));
+  const fullCommercialText = [
+    statusText,
+    customer.report || '',
+    customer.customerFeedback || '',
+    ...appts.map(a => a.content || '')
+  ].join('\n');
+  const foldedCommercial = foldVN(fullCommercialText);
 
+  const hasAny = (...patterns) => patterns.some(p => p.test(foldedCommercial));
+  const commercialRequests = [];
+  const addRequest = (label, re) => { if (re.test(foldedCommercial)) commercialRequests.push(label); };
+  addRequest('Giá / chiết khấu', /\bgia\b|chiet khau|giam gia|gia cao|gia dat/);
+  addRequest('Công nợ / thời hạn thanh toán', /cong no|thanh toan cham|no hang|han thanh toan|goi no/);
+  addRequest('Đổi trả / bán thử / ký gửi', /doi tra|ban thu|ky gui|cho thu|lay thu|hang can date/);
+  addRequest('Chương trình / thưởng / hỗ trợ', /chuong trinh|thuong doanh so|ho tro|trung bay|khuyen mai/);
+  addRequest('Hóa đơn / chứng từ / nguồn gốc', /hoa don|chung tu|chinh hang|nguon goc|co cq|phap ly/);
+  addRequest('Độc quyền / điều kiện đặc biệt', /doc quyen|dieu kien dac biet|ngoai chinh sach|yeu cau dac biet/);
+
+  const signalFlags = {
+    explicitCustomerFeedback: !!String(customer.customerFeedback || '').trim(),
+    refusalOrNoInterest: hasAny(/tu choi|khong hop tac|khong quan tam|khong co nhu cau|khong nhap|khong lay|khong mua/),
+    delayOrPoliteDeferral: hasAny(/de xem|xem xet|tra loi sau|phan hoi sau|hoi lai|hoi sep|cho sep|cho duyet|de sau|luc khac|chua quyet/),
+    pricePressure: hasAny(/gia cao|gia dat|chiet khau thap|gia chua tot|gia khong canh tranh|re hon|gia ben kia/),
+    positiveBuyingSignal: hasAny(/dong y|quan tam|lay thu|dat hang|chot|xin bao gia|gui bao gia|du kien mua|se lay|nhap thu/),
+    decisionMakerIssue: hasAny(/nguoi quyet dinh|chu nha thuoc|giam doc|sep|chu doanh nghiep|ke toan duyet|mua hang duyet/),
+    competitorOrCurrentSupplier: hasAny(/doi thu|nha cung cap hien tai|nha cung cap khac|hang khac|san pham khac|ben khac/),
+    repeatedFollowUpWithoutClearProgress: appointmentTimeline.length >= 3 && !/thanh cong|da thanh cong/i.test(foldVN(statusText)),
+    commercialRequests
+  };
+  const isNotSuccessful = signalFlags.refusalOrNoInterest || /khong thanh cong|khong hop tac|tu choi/i.test(foldVN(statusText));
+
+  /* ---------- 3) CHỌN KHO KIẾN THỨC LIÊN QUAN NHẤT, TRÁNH NHỒI TOÀN BỘ ---------- */
+  let kbRaw = null;
+  try { kbRaw = await dbGet('settings/aiHandlingKnowledge'); } catch (e) { kbRaw = null; }
+  const kb = normalizeKnowledgeEntries(kbRaw);
+  const stopWords = new Set(['cua','cho','voi','nhung','cac','ban','khach','hang','nhan','vien','cong','ty','ideco','nay','kia','mot','nhieu','trong','ngoai','khi','neu','thi','la','va','de','duoc','dang','da','se','ve','tai','tu','theo','can','nen','hay','phai']);
+  const contextTerms = Array.from(new Set(
+    foldVN([customer.name, customer.type, customer.report, customer.customerFeedback, commercialRequests.join(' ')].join(' '))
+      .split(/[^a-z0-9]+/)
+      .filter(x => x.length >= 3 && !stopWords.has(x))
+  )).slice(0, 140);
+
+  const scoredKb = kb.map((x, index) => {
+    const title = foldVN(x.title);
+    const content = foldVN(x.content).slice(0, 14000);
+    let score = 0;
+    for (const term of contextTerms) {
+      if (title.includes(term)) score += 5;
+      else if (content.includes(term)) score += 1;
+    }
+    return { ...x, _score: score, _order: index };
+  }).sort((a,b) => (b._score - a._score) || (a._order - b._order));
+
+  const selectedKb = [];
+  const seenKb = new Set();
+  const pushKb = (x) => {
+    const key = String(x?.title || '').trim();
+    if (!key || seenKb.has(key)) return;
+    seenKb.add(key); selectedKb.push(x);
+  };
+  scoredKb.filter(x => x._score > 0).slice(0, 10).forEach(pushKb);
+  kb.slice(0, 4).forEach(pushKb); // luôn giữ một số mục mới nhất để tránh bỏ sót hướng dẫn vừa cập nhật
+  const kbForPrompt = selectedKb.slice(0, 12);
+  let knowledgeText = kbForPrompt.map((x, i) => {
+    let updated = '';
+    try { updated = x.updatedAt || x.createdAt ? new Date(x.updatedAt || x.createdAt).toISOString() : ''; } catch (e) {}
+    return `\n[Kiến thức nội bộ ${i+1}]\nTiêu đề: ${clipText(x.title, 250)}\nCập nhật: ${updated || 'không rõ'}\nMức liên quan sơ bộ: ${x._score || 0}\nNội dung:\n${clipText(x.content, 7000)}`;
+  }).join('\n');
+  if (knowledgeText.length > 36000) knowledgeText = knowledgeText.slice(0, 36000) + '\n[Đã lược bớt Kho kiến thức để giữ phân tích ổn định]';
+
+  /* ---------- 4) PROMPT CỐ VẤN: EVIDENCE -> TIMELINE -> PHẢN ĐỐI -> CHỐT ---------- */
   const prompt = `
-Bạn là CỐ VẤN KINH DOANH CẤP CAO của IDECO, chuyên hỗ trợ Ban Giám đốc và nhân viên kinh doanh xử lý khách hàng dược/nhà thuốc.
+Bạn là HUYỀN — CỐ VẤN KINH DOANH CẤP CAO của IDECO, được Chú Triết đào tạo để hỗ trợ nhân viên xử lý tình huống khách hàng trong ngành dược/nhà thuốc.
 
-MỤC TIÊU:
-Phân tích HỒ SƠ ĐÃ LƯU MỚI NHẤT của khách hàng và đưa ra hướng xử lý thực tế, thông minh, có thứ tự ưu tiên. Khi có Kho kiến thức nội bộ IDECO phù hợp, phải ưu tiên vận dụng nội dung đó. Không được tự bịa giá, chiết khấu, chính sách, phản hồi khách hoặc cam kết của công ty.
+MỤC TIÊU DUY NHẤT:
+Đọc hồ sơ có thật + mốc thời gian do hệ thống tính + phản hồi khách hàng + lịch hẹn + Kho kiến thức nội bộ phù hợp, rồi đưa ra HƯỚNG XỬ LÝ TỐT NHẤT để tiến gần tới hợp tác/chốt Sales nhưng vẫn đúng thẩm quyền, đúng dữ liệu, không tự bịa chính sách và không ép khách.
 
-LƯU Ý ĐẶC BIỆT:
-- Trạng thái "Không thành công", "khách không hợp tác", "khách từ chối" KHÔNG phải lỗi dữ liệu. Đây là tình huống bán hàng hợp lệ cần được phân tích bình thường.
-- Nếu khách chưa hợp tác, hãy tìm nguyên nhân có căn cứ trong hồ sơ, đề xuất cách tái tiếp cận hoặc xác định khi nào nên tạm dừng; không ép bán và không tự suy diễn lý do.
-${isNotSuccessful ? '- Hồ sơ này có dấu hiệu khách chưa hợp tác/không thành công. Hãy ưu tiên phân tích nguyên nhân từ chối, khả năng tái kích hoạt, thời điểm theo dõi lại và điều kiện để quyết định nên tiếp tục hay tạm dừng.\n' : ''}
+NGUYÊN TẮC BẰNG CHỨNG:
+- Mọi kết luận quan trọng phải dựa trên dữ liệu có trong hồ sơ hoặc kiến thức nội bộ được cung cấp.
+- Phải phân biệt rõ: (1) SỰ THẬT ĐÃ GHI NHẬN, (2) SUY LUẬN HỢP LÝ, (3) ĐỀ XUẤT HÀNH ĐỘNG.
+- Nếu thiếu dữ liệu để kết luận, phải nói "chưa đủ dữ liệu" và đặt câu hỏi cần khai thác; KHÔNG đoán phản hồi khách, giá, chiết khấu, công nợ, đổi trả hay cam kết của IDECO.
+- Không được tự duyệt chính sách ngoài thẩm quyền. Nếu đề xuất cần giá/CK/công nợ/đổi trả đặc biệt mà Kho nội bộ không xác nhận rõ, phải chuyển thành nội dung xin Chú Triết/BGĐ duyệt.
+
 HỒ SƠ KHÁCH HÀNG MỚI NHẤT:
 - Tên khách hàng: ${clipText(customer.name, 500)}
 - Người liên hệ: ${clipText(customer.contactPerson, 300)}
@@ -886,49 +1020,64 @@ HỒ SƠ KHÁCH HÀNG MỚI NHẤT:
 - Loại khách: ${clipText(customer.type, 200)}
 - Địa chỉ: ${clipText((customer.address || '') + ' ' + (customer.province || ''), 1000)}
 - Trạng thái giao dịch: ${clipText(statusText, 300)}
-- Ngày giao dịch: ${clipText(customer.transactionDate, 100)}
-- Thời điểm lưu/cập nhật gần nhất: ${savedAt}
-- Nội dung báo cáo mới nhất:\n${clipText(customer.report || '(trống)', 14000)}
-- Khách hàng phản hồi:\n${clipText(customer.customerFeedback || '(trống)', 7000)}
+- Ngày bắt đầu giao dịch ghi nhận: ${clipText(customer.transactionDate, 100)}
+- Thời điểm lưu/cập nhật hồ sơ gần nhất: ${savedAt || '(không rõ)'}
+- Nội dung báo cáo mới nhất:\n${clipText(customer.report || '(trống)', 16000)}
+- Phản hồi khách hàng:\n${clipText(customer.customerFeedback || '(trống)', 9000)}
 - Lịch hẹn / bước tiếp theo:\n${JSON.stringify(appts)}
 
-KHO KIẾN THỨC XỬ LÝ TÌNH HUỐNG NỘI BỘ IDECO:
-${knowledgeText || '(Chưa có nội dung trong kho nội bộ)'}
+MỐC THỜI GIAN DO HỆ THỐNG TÍNH SẴN — KHÔNG TỰ TÍNH LẠI NẾU KHÔNG CẦN:
+${JSON.stringify(timelineSummary)}
 
-NGUYÊN TẮC PHÂN TÍCH:
-1. Tách rõ SỰ THẬT đã có trong hồ sơ với SUY LUẬN/ĐỀ XUẤT.
-2. Xác định khách đang ở giai đoạn nào: mới tiếp cận, quan tâm, cân nhắc, trì hoãn, từ chối, đàm phán, chờ chính sách, sắp đặt hàng, đã thành công, hoặc cần tái kích hoạt.
-3. Phát hiện rào cản chính: sản phẩm, giá, chiết khấu, công nợ, đổi trả, tồn kho, nhu cầu, người quyết định, thời gian phản hồi, đối thủ, hay thiếu thông tin.
-4. Đưa ra 3-6 hành động tiếp theo theo THỨ TỰ ƯU TIÊN. Mỗi hành động phải có lý do và mục tiêu.
-5. Nếu phù hợp, tạo một câu gợi ý nhân viên có thể nói/nhắn với khách. Không tự tạo chính sách hoặc con số chưa được cung cấp.
-6. Nêu thông tin còn thiếu mà nhân viên nên bổ sung để Ban Giám đốc ra quyết định tốt hơn.
-7. Nếu cần Ban Giám đốc hỗ trợ, nói rõ cần duyệt/quyết định/chuẩn bị nội dung gì; nếu chưa cần thì ghi rõ chưa cần.
-8. Nếu dùng kiến thức nội bộ, liệt kê đúng TIÊU ĐỀ đã tham chiếu. Không nói đã dùng nếu không thực sự phù hợp.
-9. Tránh lời khuyên chung chung kiểu “chăm sóc tốt hơn”; phải chỉ rõ nên làm gì tiếp theo.
-10. BẮT BUỘC phân tích yếu tố thời gian: từ ngày bắt đầu giao dịch đến hôm nay, lần lưu gần nhất, lịch hẹn gần nhất, lịch hẹn đang mở và việc có bị trễ hẹn hay không. Dựa vào đó đánh giá nhịp chăm sóc có quá lâu/quá dày hay hợp lý.
-11. BẮT BUỘC kết luận rõ một trong các hướng: tiếp tục trao đổi ngay; tiếp tục nhưng đổi cách tiếp cận; chờ đến lịch hẹn đã chốt; tạm dừng và tái kích hoạt sau; hoặc cần trao đổi với Chú Triết/BGĐ ngay.
-12. Nếu tình huống liên quan chính sách ngoài thẩm quyền, khách lớn/chuỗi, yêu cầu giá/chiết khấu/công nợ/đổi trả đặc biệt, có nguy cơ mất khách, kéo dài nhiều vòng không tiến triển, hoặc kiến thức nội bộ yêu cầu báo cấp trên -> đề nghị "Trao đổi với Chú Triết ngay" và nói rõ cần xin ý kiến điều gì.
-13. Nếu chưa cần trao đổi với Chú Triết, ghi rõ vì sao nhân viên có thể tự xử lý ở bước tiếp theo.
+TÍN HIỆU THƯƠNG MẠI DO HỆ THỐNG NHẬN DIỆN SƠ BỘ — CHỈ LÀ GỢI Ý, PHẢI KIỂM TRA LẠI BẰNG NỘI DUNG GỐC:
+${JSON.stringify(signalFlags)}
+
+KHO KIẾN THỨC NỘI BỘ IDECO ĐÃ LỌC THEO MỨC LIÊN QUAN:
+${knowledgeText || '(Chưa có nội dung phù hợp trong Kho kiến thức nội bộ)'}
+
+QUY TRÌNH PHÂN TÍCH BẮT BUỘC:
+1. TIMELINE: Xác định tuổi hồ sơ, lần cập nhật gần nhất, lịch hẹn đã hoàn thành, lịch hẹn quá hạn, lịch hẹn sắp tới, số ngày trễ và nhịp theo dõi. Tuyệt đối không coi một lịch hẹn tương lai là "lần tương tác đã xảy ra".
+2. NHỊP CHĂM SÓC: Nếu đã theo nhiều vòng mà không tiến triển, không được lặp lại cùng một cách tiếp cận; phải đề xuất đổi góc tiếp cận, đổi giá trị trao đổi hoặc xin quyết định dừng/tái kích hoạt.
+3. GIAI ĐOẠN SALES: Chọn đúng giai đoạn: mới tiếp cận / khám phá nhu cầu / quan tâm / cân nhắc / đàm phán / trì hoãn / từ chối / chờ chính sách / chờ người quyết định / thử hàng / sắp chốt / đã hợp tác / cần tái kích hoạt.
+4. RÀO CẢN GỐC: Tìm rào cản thật sự, không chỉ lặp lại câu khách nói. Ví dụ "giá cao" có thể cần làm rõ khách đang so với sản phẩm nào, quy cách nào, giá mua vào hay giá bán ra; nhưng chỉ được coi là giả thuyết cho tới khi có bằng chứng.
+5. PHẢN ĐỐI/TỪ CHỐI: Với từng phản đối phải phân loại một trong: "Từ chối thật", "Trì hoãn lịch sự", "Yêu cầu thương lượng", "Thiếu thông tin", "Chưa gặp người quyết định", "Đang ưu tiên nhà cung cấp khác", "Khác". Sau đó nêu câu hỏi làm rõ + cách xử lý + dấu hiệu để biết phản đối đã được giải quyết.
+6. YÊU CẦU/ĐIỀU KIỆN KHÁCH HÀNG: Nếu khách yêu cầu giá, CK, công nợ, đổi trả, bán thử, chương trình, hóa đơn/chứng từ, độc quyền hoặc điều kiện đặc biệt thì phải tách từng yêu cầu. Phân loại: "Có thể xử lý theo dữ liệu đã có" / "Cần Chú Triết-BGĐ duyệt" / "Chưa đủ dữ liệu". Không hứa thay BGĐ.
+7. KHO KIẾN THỨC: Chỉ áp dụng kiến thức thực sự liên quan. Nếu nhiều mục mâu thuẫn, ưu tiên mục cập nhật mới hơn trong cùng tình huống; nếu vẫn chưa chắc, nêu rõ cần BGĐ xác nhận. Liệt kê đúng tiêu đề đã dùng.
+8. CHIẾN LƯỢC CHỐT: Không mặc định phải chốt đơn ngay. Chọn "cam kết nhỏ nhất tiếp theo" có xác suất cao nhất: đồng ý nhận báo giá, chọn 1-2 sản phẩm thử, xác nhận chính sách cần duyệt, hẹn người quyết định, chốt thời gian phản hồi, hoặc đặt đơn thử — nhưng chỉ đề xuất các hình thức phù hợp dữ liệu/chính sách đã biết.
+9. ĐÒN BẨY GIÁ TRỊ: Khi phù hợp, có thể nhấn vào giá trị như hàng chính hãng, hóa đơn/chứng từ đầy đủ, hỗ trợ bán thử/đổi trả/công nợ/chương trình CHỈ KHI các quyền lợi này có trong hồ sơ hoặc Kho kiến thức. Nếu chưa có căn cứ, ghi "cần xác nhận chính sách".
+10. THỜI ĐIỂM LIÊN HỆ: Nếu có lịch hẹn tương lai đã chốt, ưu tiên tôn trọng lịch đó trừ khi có lý do cấp bách. Nếu lịch đã quá hạn, đề xuất liên hệ bù và cách mở lời. Nếu im lặng quá lâu, cần chiến lược tái kích hoạt khác với nhắc lại thông thường.
+11. BGĐ/CHÚ TRIẾT: Chỉ đề nghị "Trao đổi với Chú Triết ngay" khi có ít nhất một lý do cụ thể: chính sách ngoài thẩm quyền, khách chuỗi/khách lớn, yêu cầu thương mại đặc biệt, nguy cơ mất khách đáng kể, xung đột chính sách, hoặc nhiều vòng không tiến triển cần quyết định chiến lược.
+12. CÂU NÓI GỢI Ý: Phải tự nhiên, tôn trọng khách, không gây áp lực quá mức, không nói quá công dụng/sản phẩm, không hứa điều chưa được duyệt.
+13. KẾT LUẬN: Phải trả lời rõ "Bây giờ nên làm gì trước tiên?", "Mục tiêu của lần liên hệ tiếp theo là gì?", "Điều gì cần hỏi thêm?", và "Khi nào cần dừng/đổi chiến lược?".
+${isNotSuccessful ? '\nLƯU Ý RIÊNG HỒ SƠ NÀY: Có dấu hiệu chưa thành công/từ chối. Hãy đánh giá khả năng phục hồi: từ chối thật hay trì hoãn; nguyên nhân có căn cứ; điều kiện nào mới đáng tái tiếp cận; và tránh lặp lại cách chào cũ nếu đã không hiệu quả.\n' : ''}
 
 TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 {
-  "situationSummary":"Tóm tắt tình huống hiện tại 2-4 câu",
-  "stage":"Giai đoạn khách hàng",
+  "situationSummary":"Tóm tắt tình huống hiện tại 3-5 câu, có dẫn mốc thời gian quan trọng nếu có",
+  "stage":"Giai đoạn Sales hiện tại",
   "priority":"Cao|Trung bình|Thấp",
-  "mainBarrier":"Rào cản chính hoặc chưa xác định",
-  "opportunities":["..."],
-  "risks":["..."],
+  "mainBarrier":"Rào cản gốc hoặc 'Chưa đủ dữ liệu để xác định'",
+  "dealHealth":{"score":0,"label":"Tốt|Có cơ hội nhưng cần xử lý|Đang chững|Nguy cơ mất|Chưa đủ dữ liệu","basis":"Lý do ngắn dựa trên bằng chứng"},
+  "timelineAssessment":"Đánh giá cụ thể mốc thời gian, số ngày, lịch quá hạn/sắp tới và nhịp chăm sóc",
+  "opportunities":["Cơ hội có căn cứ"],
+  "risks":["Rủi ro có căn cứ"],
+  "objectionHandling":[
+    {"objection":"Phản đối/từ chối/yêu cầu cụ thể","evidence":"Dữ liệu gốc nào cho thấy điều này","classification":"Từ chối thật|Trì hoãn lịch sự|Yêu cầu thương lượng|Thiếu thông tin|Chưa gặp người quyết định|Đang ưu tiên nhà cung cấp khác|Khác","clarifyingQuestion":"Câu hỏi cần hỏi để hiểu đúng","responseStrategy":"Cách xử lý tốt nhất","resolvedSignal":"Dấu hiệu cho thấy đã xử lý được"}
+  ],
+  "negotiationPlan":[
+    {"request":"Yêu cầu/điều kiện của khách","authority":"Có thể xử lý theo dữ liệu đã có|Cần Chú Triết-BGĐ duyệt|Chưa đủ dữ liệu","recommendedResponse":"Cách phản hồi","approvalNeeded":"Nếu cần duyệt, ghi chính xác điều cần xin; nếu không thì để trống"}
+  ],
+  "closingPlan":{"objective":"Mục tiêu cụ thể của bước chốt tiếp theo","minimumCommitment":"Cam kết nhỏ nhất cần đạt ở lần liên hệ tới","valueAngle":"Giá trị nên nhấn mạnh có căn cứ","successSignal":"Dấu hiệu khách đang tiến gần hợp tác","fallback":"Nếu khách vẫn chưa đồng ý thì chuyển sang phương án nào"},
   "recommendedActions":[
-    {"step":1,"action":"Việc cần làm","reason":"Vì sao","goal":"Mục tiêu","suggestedScript":"Câu gợi ý có thể dùng với khách hoặc để trống"}
+    {"step":1,"action":"Việc cần làm theo thứ tự ưu tiên","reason":"Vì sao","goal":"Mục tiêu","suggestedScript":"Câu gợi ý có thể dùng với khách hoặc để trống"}
   ],
   "missingInfo":["Thông tin còn thiếu cần khai thác"],
   "managementSupport":"Nội dung BGĐ nên hỗ trợ/duyệt hoặc 'Chưa cần hỗ trợ đặc biệt'",
-  "nextFollowUp":"Đề xuất thời điểm/cách theo dõi tiếp; nếu hồ sơ không đủ dữ liệu thời gian thì nói cần chốt lịch cụ thể",
-  "timelineAssessment":"Đánh giá thời gian từ lúc bắt đầu giao dịch tới cập nhật/lịch hẹn mới nhất và ý nghĩa đối với cách chăm sóc",
+  "nextFollowUp":"Thời điểm và cách theo dõi tiếp theo, bám đúng lịch đã có",
   "relationshipDecision":"Tiếp tục trao đổi ngay|Tiếp tục nhưng đổi cách tiếp cận|Chờ đến lịch hẹn đã chốt|Tạm dừng và tái kích hoạt sau|Trao đổi với Chú Triết ngay",
-  "talkToTriet":{"needed":true,"reason":"Vì sao cần/không cần trao đổi với Chú Triết","ask":"Nếu cần, nội dung cụ thể cần xin ý kiến/duyệt; nếu không cần để trống"},
-  "knowledgeUsed":["Đúng tiêu đề kiến thức nội bộ đã sử dụng"],
-  "finalAdvice":"Kết luận hướng xử lý tốt nhất, ngắn gọn nhưng cụ thể"
+  "talkToTriet":{"needed":true,"reason":"Lý do có căn cứ","ask":"Nội dung cụ thể cần xin ý kiến/duyệt; nếu không cần để trống"},
+  "knowledgeUsed":["Đúng tiêu đề kiến thức nội bộ đã thực sự sử dụng"],
+  "finalAdvice":"Kết luận ngắn gọn: việc số 1 cần làm ngay + mục tiêu + giới hạn cần lưu ý"
 }`;
 
   let raw = '';
@@ -938,22 +1087,18 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   if (turbo) {
     try {
       raw = await callHuyenTurbo(prompt, { json: true });
-      /* Turbo đôi khi trả text nhưng JSON bị cắt. Xem như lỗi mềm và tự fallback. */
       if (!safeJson(raw, null)) throw new Error('TURBO_BAD_JSON');
     } catch (e) {
       turboFailed = true;
       turboError = e;
-      console.warn('[HUYEN TURBO] Kết nối/JSON lỗi, tự chuyển sang 3 API dự phòng:', e);
-      try {
-        window.__IDECO_HUYEN_TURBO_FALLBACK__ = { at: Date.now(), reason: String(e?.message || e) };
-      } catch (_) {}
+      console.warn('[HUYEN TURBO] Kết nối/JSON lỗi, tự chuyển sang AI thường + API dự phòng:', e);
+      try { window.__IDECO_HUYEN_TURBO_FALLBACK__ = { at: Date.now(), reason: String(e?.message || e) }; } catch (_) {}
     }
   }
 
-  /* Chế độ thường, hoặc Turbo vừa lỗi: tự chạy Gemini 3.6 với cơ chế API 01 -> 02 -> 03. */
   if (!turbo || turboFailed) {
     try {
-      raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.25 });
+      raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.16 });
     } catch (normalErr) {
       const err = new Error('HUYEN_ALL_AI_FAILED');
       err.turboError = turboError;
@@ -964,20 +1109,22 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 
   let r = safeJson(raw, null);
   if (!r) {
-    /* Một lần sửa JSON nhẹ bằng chế độ thường; không gọi Turbo lần nữa để tránh lặp lỗi. */
-    const repairPrompt = `Hãy chuyển nội dung sau thành đúng JSON theo cấu trúc yêu cầu, không thêm markdown, không bịa dữ liệu:\n${clipText(raw, 12000)}`;
+    const repairPrompt = `Chuyển nội dung sau thành đúng JSON theo cấu trúc đã yêu cầu. Không thêm markdown, không bịa dữ liệu, giữ nguyên nội dung phân tích:\n${clipText(raw, 14000)}`;
     try {
-      const repaired = await callGemini(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.05 });
+      const repaired = await callGemini(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.03 });
       r = safeJson(repaired, null);
     } catch (e) {}
   }
   if (!r) throw new Error('AI_BAD_JSON');
 
-  /* Gắn metadata nội bộ, giao diện cũ bỏ qua nếu không dùng. */
   r._huyenMeta = {
     turboRequested: !!turbo,
     turboFallback: !!turboFailed,
-    analyzedAt: Date.now()
+    analyzedAt: Date.now(),
+    timelineSummary,
+    signalFlags,
+    knowledgeCandidates: kb.length,
+    knowledgeSelected: kbForPrompt.length
   };
   return r;
 }
@@ -4804,8 +4951,8 @@ function Popups({
                   <I.Sparkles width="13" height="13" /> AI cố vấn từ hồ sơ mới nhất + kho nội bộ
                 </p>
                 <h3 className="font-display text-[20px] font-extrabold text-ink mt-1 leading-tight">Thay mặt Chú Triết, Huyền gợi ý hướng xử lý...</h3>
-                <p className="text-[12px] text-slate-500 mt-1.5 leading-relaxed">
-                  Huyền đang đọc bản lưu mới nhất của <b className="text-ink">{advisorCustomer.name}</b>, phản hồi khách hàng, lịch hẹn, trạng thái giao dịch và Kho kiến thức trong Cài đặt.
+                <p className="text-[14.5px] sm:text-[16px] font-semibold text-slate-600 mt-2 leading-relaxed">
+                  Huyền được Chú Triết đào tạo và hướng dẫn để hỗ trợ các bạn xử lý tình huống khách hàng - nên việc các bạn càng khai báo đúng sẽ giúp chúng ta dễ chốt Sales hơn.
                 </p>
               </div>
               <button onClick={() => setAdvisorCustomer(null)} className="btn w-9 h-9 bg-paper text-slate-400 hover:text-crimson shrink-0"><I.X width="16" height="16" /></button>
@@ -4845,7 +4992,7 @@ function Popups({
               <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-center fade-in">
                 <I.Loader width="22" height="22" className="animate-spin text-amber2 mx-auto" />
                 <p className="font-display text-[15px] font-extrabold text-ink mt-3">Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý...</p>
-                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang dùng Kie.ai Turbo 3.7 Flash với suy luận cao và đối chiếu Kho kiến thức nội bộ.' : 'Đang đối chiếu dữ liệu khách hàng với Kho kiến thức nội bộ mới nhất.'}</p>
+                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang rà soát timeline, phản hồi, yêu cầu thương mại và Kho kiến thức nội bộ với suy luận cao.' : 'Huyền đang rà soát mốc thời gian, nội dung, phản hồi khách hàng và Kho kiến thức để tìm hướng chốt phù hợp nhất.'}</p>
                 <HuyenAnalysisTicker />
               </div>
             )}
@@ -4866,6 +5013,16 @@ function Popups({
                   </div>
                   <p className="text-[13px] font-semibold text-ink leading-relaxed">{directAdvisorResult.situationSummary}</p>
                   {directAdvisorResult.mainBarrier && <p className="text-[11.5px] text-slate-500 mt-2"><b className="text-ink">Rào cản chính:</b> {directAdvisorResult.mainBarrier}</p>}
+                  {directAdvisorResult.dealHealth && (
+                    <div className="mt-3 rounded-xl bg-slate-50 border border-line p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">Khả năng tiến tới hợp tác</span>
+                        <span className="ml-auto text-[14px] font-extrabold text-ink">{Number.isFinite(Number(directAdvisorResult.dealHealth.score)) ? `${Math.max(0, Math.min(100, Number(directAdvisorResult.dealHealth.score)))}%` : ''}</span>
+                      </div>
+                      {directAdvisorResult.dealHealth.label && <p className="text-[13px] font-bold text-ink mt-1">{directAdvisorResult.dealHealth.label}</p>}
+                      {directAdvisorResult.dealHealth.basis && <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">{directAdvisorResult.dealHealth.basis}</p>}
+                    </div>
+                  )}
                 </div>
 
                 {Array.isArray(directAdvisorResult.recommendedActions) && directAdvisorResult.recommendedActions.length > 0 && (
@@ -4881,6 +5038,45 @@ function Popups({
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {Array.isArray(directAdvisorResult.objectionHandling) && directAdvisorResult.objectionHandling.length > 0 && (
+                  <div className="rounded-xl bg-orange-50/70 border border-orange-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber-700 mb-2">Xử lý từ chối / phản đối</p>
+                    <div className="space-y-2">
+                      {directAdvisorResult.objectionHandling.map((o,i) => (
+                        <div key={i} className="rounded-lg bg-white/80 border border-orange-100 p-3">
+                          <p className="text-[12.5px] font-extrabold text-ink">{o.objection || `Tình huống ${i+1}`}</p>
+                          {o.classification && <p className="text-[11.5px] text-amber-800 mt-1"><b>Phân loại:</b> {o.classification}</p>}
+                          {o.clarifyingQuestion && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Cần hỏi rõ:</b> {o.clarifyingQuestion}</p>}
+                          {o.responseStrategy && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Hướng xử lý:</b> {o.responseStrategy}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {directAdvisorResult.closingPlan && (
+                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-jade mb-2">Kế hoạch chốt hợp tác</p>
+                    {directAdvisorResult.closingPlan.objective && <p className="text-[12.5px] font-bold text-ink leading-relaxed"><b>Mục tiêu:</b> {directAdvisorResult.closingPlan.objective}</p>}
+                    {directAdvisorResult.closingPlan.minimumCommitment && <p className="text-[11.8px] text-slate-600 mt-1.5 leading-relaxed"><b>Cam kết nhỏ nhất cần đạt:</b> {directAdvisorResult.closingPlan.minimumCommitment}</p>}
+                    {directAdvisorResult.closingPlan.valueAngle && <p className="text-[11.8px] text-slate-600 mt-1.5 leading-relaxed"><b>Giá trị nên nhấn:</b> {directAdvisorResult.closingPlan.valueAngle}</p>}
+                    {directAdvisorResult.closingPlan.fallback && <p className="text-[11.8px] text-slate-600 mt-1.5 leading-relaxed"><b>Nếu chưa chốt:</b> {directAdvisorResult.closingPlan.fallback}</p>}
+                  </div>
+                )}
+
+                {Array.isArray(directAdvisorResult.negotiationPlan) && directAdvisorResult.negotiationPlan.length > 0 && (
+                  <div className="rounded-xl bg-violet-50/70 border border-violet-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-violet2 mb-2">Yêu cầu / điều kiện khách hàng</p>
+                    <div className="space-y-2">{directAdvisorResult.negotiationPlan.map((n,i)=>(
+                      <div key={i} className="text-[11.8px] text-slate-600 leading-relaxed">
+                        <b className="text-ink">{n.request || `Yêu cầu ${i+1}`}:</b> {n.recommendedResponse || ''}
+                        {n.authority && <span className="font-semibold text-violet2"> · {n.authority}</span>}
+                        {n.approvalNeeded && <div className="mt-1 font-semibold text-crimson">Cần xin duyệt: {n.approvalNeeded}</div>}
+                      </div>
+                    ))}</div>
                   </div>
                 )}
 
@@ -5071,7 +5267,7 @@ function Popups({
                     <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 flex items-center gap-1.5">
                       <I.Sparkles width="13" height="13" /> Thay mặt Chú Triết, Huyền gợi ý hướng xử lý
                     </p>
-                    <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Phân tích bản lưu mới nhất và đối chiếu Kho kiến thức nội bộ trong Cài đặt.</p>
+                    <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed">Rà soát timeline giao dịch, phản hồi/từ chối, yêu cầu thương mại và Kho kiến thức nội bộ để chọn hướng xử lý tốt nhất.</p>
                   </div>
                 </div>
                 <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`btn w-full py-2.5 mb-2.5 border text-[11.5px] ${huyenTurbo ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-line text-slate-500'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`}>
@@ -5097,6 +5293,16 @@ function Popups({
                       </div>
                       <p className="text-[13px] font-semibold text-ink leading-relaxed">{advisorResult.situationSummary}</p>
                       {advisorResult.mainBarrier && <p className="text-[11.5px] text-slate-500 mt-2"><b className="text-ink">Rào cản chính:</b> {advisorResult.mainBarrier}</p>}
+                      {advisorResult.dealHealth && (
+                        <div className="mt-3 rounded-xl bg-slate-50 border border-line p-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10.5px] font-extrabold uppercase tracking-wide text-slate-500">Khả năng tiến tới hợp tác</span>
+                            <span className="ml-auto text-[13.5px] font-extrabold text-ink">{Number.isFinite(Number(advisorResult.dealHealth.score)) ? `${Math.max(0, Math.min(100, Number(advisorResult.dealHealth.score)))}%` : ''}</span>
+                          </div>
+                          {advisorResult.dealHealth.label && <p className="text-[12.5px] font-bold text-ink mt-1">{advisorResult.dealHealth.label}</p>}
+                          {advisorResult.dealHealth.basis && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed">{advisorResult.dealHealth.basis}</p>}
+                        </div>
+                      )}
                     </div>
 
                     {Array.isArray(advisorResult.recommendedActions) && advisorResult.recommendedActions.length > 0 && (
@@ -5115,6 +5321,40 @@ function Popups({
                       </div>
                     )}
 
+                    {Array.isArray(advisorResult.objectionHandling) && advisorResult.objectionHandling.length > 0 && (
+                      <div className="rounded-xl bg-orange-50/70 border border-orange-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-amber-700 mb-2">Xử lý từ chối / phản đối</p>
+                        {advisorResult.objectionHandling.map((o,i)=>(
+                          <div key={i} className="mb-2 last:mb-0 rounded-lg bg-white/80 border border-orange-100 p-3">
+                            <p className="text-[12px] font-extrabold text-ink">{o.objection || `Tình huống ${i+1}`}</p>
+                            {o.classification && <p className="text-[11px] text-amber-800 mt-1"><b>Phân loại:</b> {o.classification}</p>}
+                            {o.clarifyingQuestion && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Cần hỏi rõ:</b> {o.clarifyingQuestion}</p>}
+                            {o.responseStrategy && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Hướng xử lý:</b> {o.responseStrategy}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {advisorResult.closingPlan && (
+                      <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-jade mb-2">Kế hoạch chốt hợp tác</p>
+                        {advisorResult.closingPlan.objective && <p className="text-[12px] font-bold text-ink leading-relaxed"><b>Mục tiêu:</b> {advisorResult.closingPlan.objective}</p>}
+                        {advisorResult.closingPlan.minimumCommitment && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Cam kết nhỏ nhất:</b> {advisorResult.closingPlan.minimumCommitment}</p>}
+                        {advisorResult.closingPlan.valueAngle && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Giá trị nên nhấn:</b> {advisorResult.closingPlan.valueAngle}</p>}
+                        {advisorResult.closingPlan.fallback && <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed"><b>Nếu chưa chốt:</b> {advisorResult.closingPlan.fallback}</p>}
+                      </div>
+                    )}
+                    {Array.isArray(advisorResult.negotiationPlan) && advisorResult.negotiationPlan.length > 0 && (
+                      <div className="rounded-xl bg-violet-50/70 border border-violet-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-violet2 mb-2">Yêu cầu / điều kiện khách hàng</p>
+                        {advisorResult.negotiationPlan.map((n,i)=>(
+                          <div key={i} className="text-[11.5px] text-slate-600 leading-relaxed mb-2 last:mb-0">
+                            <b className="text-ink">{n.request || `Yêu cầu ${i+1}`}:</b> {n.recommendedResponse || ''}
+                            {n.authority && <span className="font-semibold text-violet2"> · {n.authority}</span>}
+                            {n.approvalNeeded && <div className="mt-1 font-semibold text-crimson">Cần xin duyệt: {n.approvalNeeded}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {Array.isArray(advisorResult.opportunities) && advisorResult.opportunities.length > 0 && (
                       <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-3.5">
                         <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-emerald-700 mb-2">Cơ hội</p>
