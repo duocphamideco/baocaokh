@@ -138,6 +138,12 @@ tailwind.config = {
     min-height:34px;white-space:normal;text-align:center;line-height:1.25;
   }
   .huyen-advisor-entry-btn:hover{background:#bd253d !important}
+  .huyen-advisor-fast-btn{
+    background:#1d6fd0 !important;color:#fff !important;border:1px solid #185fb4 !important;
+    font-weight:900 !important;box-shadow:0 8px 20px -10px rgba(29,111,208,.65);
+    min-height:34px;white-space:normal;text-align:center;line-height:1.25;
+  }
+  .huyen-advisor-fast-btn:hover{background:#185fb4 !important}
   .line-clamp-2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .safe-b{padding-bottom:env(safe-area-inset-bottom)}
   #root{height:100%}
@@ -169,7 +175,7 @@ tailwind.config = {
 
 <script type="text/jsx-source" id="app-source">
 /* ============================================================================
-   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN LARGE SMOOTH + RED CTA
+   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN + B.AI DEEPSEEK V4 FLASH NEW KEY
    ============================================================================ */
 
 /* ####################################################################
@@ -462,9 +468,397 @@ const geminiKeys = () => geminiKeyEntries().map(x => x.key);
 const maskGeminiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
 const isKeyCooling = (key) => (GEMINI_KEY_COOLDOWN.get(key) || 0) > Date.now();
 
+
+/* ---------------- AI CHÍNH CHO HUYỀN — Gemini hoặc DeepSeek V4 Flash qua B.AI ----------------
+   Lưu ý: đây là ứng dụng HTML phía trình duyệt. API key nằm ở client/Firebase có thể bị người dùng kỹ thuật xem thấy.
+*/
+const HUYEN_AI_PROVIDERS = {
+  GEMINI: 'gemini',
+  DEEPSEEK_V4_FLASH: 'deepseek-v4-flash'
+};
+const BAI_BASE_URL = 'https://api.b.ai/v1';
+const BAI_ENDPOINT = `${BAI_BASE_URL}/chat/completions`;
+const BAI_MODEL_ID = 'deepseek-v4-flash';
+/* Key B.AI do BGĐ cung cấp. Có thể thay trong Cài đặt và lưu Firebase. */
+const BAI_DEFAULT_API_KEY = 'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1';
+/* Tự thay key mặc định cũ đã từng lưu trên Firebase bằng key mới ở bản này. */
+const BAI_LEGACY_DEFAULT_KEYS = new Set(['sk-i2zxo8byhg6uetizhlz4x6ikq80f5bgs']);
+let BAI_API_KEY = BAI_DEFAULT_API_KEY;
+let HUYEN_PRIMARY_AI_PROVIDER = HUYEN_AI_PROVIDERS.GEMINI;
+
+const normalizeHuyenAiProvider = (v) => v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
+  ? HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH : HUYEN_AI_PROVIDERS.GEMINI;
+const setHuyenPrimaryAiProvider = (v) => { HUYEN_PRIMARY_AI_PROVIDER = normalizeHuyenAiProvider(v); };
+const resolveBaiApiKey = (savedKey) => {
+  const key = String(savedKey || '').trim();
+  return (!key || BAI_LEGACY_DEFAULT_KEYS.has(key)) ? BAI_DEFAULT_API_KEY : key;
+};
+const setBaiApiKey = (v) => { BAI_API_KEY = resolveBaiApiKey(v); };
+const maskBaiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
+
+function baiAuthHeaders(key, mode = 'bearer', withJson = true) {
+  const h = {};
+  if (withJson) h['Content-Type'] = 'application/json';
+  if (mode === 'x-api-key') h['x-api-key'] = key;
+  else h['Authorization'] = `Bearer ${key}`;
+  return h;
+}
+
+function baiFriendlyError(err) {
+  const raw = String(err?.message || err || 'Không rõ lỗi');
+  if (/BAI_BROWSER_FETCH_FAILED|Failed to fetch|NetworkError|Load failed/i.test(raw)) {
+    const proto = (typeof location !== 'undefined' && location.protocol) ? location.protocol : '';
+    return proto === 'file:'
+      ? 'Trình duyệt không gọi được api.b.ai từ file:// (khả năng CORS/mạng). Hãy chạy ứng dụng qua http/https hoặc dùng B.AI Bridge/backend.'
+      : 'Trình duyệt không kết nối được api.b.ai (khả năng CORS, DNS, tường lửa hoặc mạng chặn).';
+  }
+  if (/BAI_HTTP_401/i.test(raw)) return 'API key B.AI không hợp lệ hoặc đã bị thu hồi (HTTP 401).';
+  if (/BAI_HTTP_403/i.test(raw)) return 'B.AI từ chối quyền truy cập/model hoặc tài khoản chưa đủ điều kiện (HTTP 403).';
+  if (/BAI_HTTP_429/i.test(raw)) return 'B.AI đang giới hạn tần suất (HTTP 429). Thử lại sau.';
+  if (/BAI_MODEL_NOT_AVAILABLE/i.test(raw)) return 'Key kết nối được B.AI nhưng tài khoản hiện không thấy model deepseek-v4-flash trong /v1/models.';
+  if (/BAI_EMPTY_LENGTH/i.test(raw)) return 'B.AI đã nhận request nhưng giới hạn max_tokens quá thấp nên chưa kịp tạo câu trả lời. Bản này sẽ tự thử lại với ngân sách token lớn hơn.';
+  if (/BAI_EMPTY/i.test(raw)) return 'B.AI trả HTTP 200 nhưng phần nội dung trả lời đang rỗng. Bản này đã hỗ trợ cả JSON non-stream và SSE stream; hãy bấm Kiểm tra B.AI lại.';
+  if (/AbortError|BAI_TIMEOUT/i.test(raw)) return 'B.AI phản hồi quá lâu và đã hết thời gian chờ.';
+  return raw.replace(/^Error:\s*/i, '').slice(0, 500);
+}
+
+async function baiFetch(url, { method = 'GET', key, body = null, authMode = 'bearer', timeoutMs = 45000 } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method,
+      headers: baiAuthHeaders(key, authMode, body !== null),
+      ...(body !== null ? { body: JSON.stringify(body) } : {}),
+      signal: ctl.signal,
+      mode: 'cors',
+      cache: 'no-store'
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
+    const msg = String(e?.message || e);
+    if (e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+      const x = new Error(`BAI_BROWSER_FETCH_FAILED — ${msg}`);
+      x.cause = e;
+      throw x;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
+/* fetch + đọc TOÀN BỘ body trong cùng timeout.
+   Bản cũ chỉ timeout tới lúc nhận header; với stream, res.text() có thể chờ rất lâu mà timer đã bị clear. */
+async function baiFetchText(url, { method = 'GET', key, body = null, authMode = 'bearer', timeoutMs = 45000 } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), Math.max(3000, Number(timeoutMs) || 45000));
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: baiAuthHeaders(key, authMode, body !== null),
+      ...(body !== null ? { body: JSON.stringify(body) } : {}),
+      signal: ctl.signal,
+      mode: 'cors',
+      cache: 'no-store'
+    });
+    let raw = '';
+    try { raw = await res.text(); }
+    catch (e) {
+      if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
+      throw e;
+    }
+    return { res, raw };
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
+    const msg = String(e?.message || e);
+    if (e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+      const x = new Error(`BAI_BROWSER_FETCH_FAILED — ${msg}`);
+      x.cause = e;
+      throw x;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function baiReadError(res) {
+  let detail = '';
+  try { detail = (await res.text()).replace(/\s+/g, ' ').trim().slice(0, 900); } catch (e) {}
+  const err = new Error(`BAI_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
+  err.status = res.status;
+  return err;
+}
+
+async function baiListModels(apiKey = null) {
+  const key = String(apiKey || BAI_API_KEY || '').trim();
+  if (!key) throw new Error('NO_BAI_KEY');
+  let lastErr = null;
+  for (const authMode of ['bearer', 'x-api-key']) {
+    try {
+      const res = await baiFetch('https://api.b.ai/v1/models', { key, authMode, timeoutMs: 30000 });
+      if (!res.ok) {
+        lastErr = await baiReadError(res);
+        if (res.status === 401 || res.status === 403) continue;
+        throw lastErr;
+      }
+      const data = await res.json();
+      const items = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+      const ids = items.map(x => String(x?.id || x?.model || '')).filter(Boolean);
+      return { ids, authMode };
+    } catch (e) {
+      lastErr = e;
+      if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT/.test(String(e?.message || e))) throw e;
+    }
+  }
+  throw lastErr || new Error('BAI_MODELS_FAIL');
+}
+
+function baiTextPart(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(x => baiTextPart(x)).join('');
+  if (!v || typeof v !== 'object') return '';
+  if (typeof v.text === 'string') return v.text;
+  if (typeof v.content === 'string') return v.content;
+  if (Array.isArray(v.content)) return v.content.map(x => baiTextPart(x)).join('');
+  return '';
+}
+
+function extractBaiPayloadText(data, { allowReasoning = false } = {}) {
+  if (!data) return '';
+  if (Array.isArray(data)) return data.map(x => extractBaiPayloadText(x, { allowReasoning })).join('');
+
+  let out = '';
+  const choices = Array.isArray(data?.choices) ? data.choices : [];
+  for (const c of choices) {
+    out += baiTextPart(c?.delta?.content);
+    out += baiTextPart(c?.message?.content);
+    if (!out && typeof c?.text === 'string') out += c.text;
+  }
+
+  if (!out) out += baiTextPart(data?.output_text);
+  if (!out) out += baiTextPart(data?.response?.output_text);
+  if (!out && Array.isArray(data?.output)) {
+    for (const item of data.output) out += baiTextPart(item?.content || item?.text);
+  }
+  if (!out && Array.isArray(data?.content)) out += baiTextPart(data.content);
+
+  /* Một số model suy luận có thể trả reasoning_content trước câu trả lời cuối.
+     Chỉ dùng nó cho chẩn đoán text; KHÔNG dùng thay JSON báo cáo. */
+  if (!out && allowReasoning) {
+    for (const c of choices) {
+      out += baiTextPart(c?.delta?.reasoning_content);
+      out += baiTextPart(c?.message?.reasoning_content);
+    }
+    if (!out) out += baiTextPart(data?.reasoning_content);
+  }
+  /* GIỮ NGUYÊN khoảng trắng đầu/cuối của từng delta SSE. Nếu trim tại đây,
+     mỗi token/chunk sẽ mất khoảng trắng dẫn tới chữ Việt bị dính liền nhau. */
+  return String(out || '');
+}
+
+function parseBaiRawResponse(raw, { allowReasoning = false } = {}) {
+  const s = String(raw || '').trim();
+  if (!s) return { text: '', payload: null, isStream: false, finishReason: '' };
+
+  /* SSE / stream OpenAI-compatible: data: {...}\n ... data: [DONE] */
+  if (/^\s*(?:event:|data:)/m.test(s)) {
+    const payloads = [];
+    for (const line of s.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const body = t.slice(5).trim();
+      if (!body || body === '[DONE]') continue;
+      try { payloads.push(JSON.parse(body)); } catch (e) {}
+    }
+    const text = extractBaiPayloadText(payloads, { allowReasoning });
+    let finishReason = '';
+    for (const p of payloads) {
+      const f = p?.choices?.[0]?.finish_reason;
+      if (f) finishReason = String(f);
+    }
+    return { text, payload: payloads, isStream: true, finishReason };
+  }
+
+  try {
+    const payload = JSON.parse(s);
+    const text = extractBaiPayloadText(payload, { allowReasoning });
+    const finishReason = String(payload?.choices?.[0]?.finish_reason || '');
+    return { text, payload, isStream: false, finishReason };
+  } catch (e) {
+    /* Nếu gateway trả text thuần thì vẫn nhận thay vì báo BAI_EMPTY. */
+    return { text: s, payload: null, isStream: false, finishReason: '' };
+  }
+}
+
+async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
+  const key = String(apiKey || BAI_API_KEY || '').trim();
+  if (!key) throw new Error('NO_BAI_KEY');
+
+  /* B.AI/OpenAI compatible. Ưu tiên stream=true đúng theo mẫu curl BGĐ cung cấp.
+     Không ép response_format cho DeepSeek: prompt hiện tại đã yêu cầu JSON và safeJson sẽ kiểm tra sau. */
+  const minTokens = json ? 1024 : 256;
+  const effectiveMaxTokens = Math.max(Number(maxTokens) || 0, minTokens);
+  const baseBody = {
+    model: BAI_MODEL_ID,
+    messages: [{ role: 'user', content: String(prompt || '') }],
+    temperature,
+    max_tokens: effectiveMaxTokens
+  };
+
+  let lastErr = null;
+  for (const authMode of ['bearer', 'x-api-key']) {
+    /* QUICK ưu tiên non-stream để giảm overhead; Deep mode vẫn ưu tiên SSE như mẫu B.AI. */
+    const streamModes = effectiveMaxTokens <= 1600 ? [false, true] : [true, false];
+    for (const streamMode of streamModes) {
+      try {
+        const body = { ...baseBody, stream: streamMode };
+        const { res, raw } = await baiFetchText(BAI_ENDPOINT, {
+          method: 'POST', key, authMode, body, timeoutMs
+        });
+        if (!res.ok) {
+          let detail = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 900);
+          lastErr = new Error(`BAI_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
+          lastErr.status = res.status;
+          /* Sai auth Bearer có thể thử x-api-key. */
+          if ((res.status === 401 || res.status === 403) && authMode === 'bearer') break;
+          /* Nếu stream bị gateway từ chối, thử transport còn lại ngay. */
+          if (streamMode && [400,404,405,406,415,422,500,502,503].includes(res.status)) continue;
+          throw lastErr;
+        }
+
+        const parsed = parseBaiRawResponse(raw, { allowReasoning: false });
+        const answer = String(parsed.text || '').trim();
+        if (answer) {
+          try {
+            window.__IDECO_HUYEN_PRIMARY_AI_LAST__ = {
+              provider: 'B.AI', model: BAI_MODEL_ID, at: Date.now(), key: maskBaiKey(key), authMode,
+              stream: parsed.isStream, finishReason: parsed.finishReason || ''
+            };
+          } catch (_) {}
+          return answer;
+        }
+
+        /* HTTP 200 nhưng content rỗng: ghi chẩn đoán KHÔNG có API key rồi thử transport còn lại. */
+        try {
+          const rawPreview = String(raw || '').replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-••••').slice(0, 1200);
+          console.warn('[B.AI EMPTY RESPONSE]', {
+            model: BAI_MODEL_ID, authMode, stream: streamMode,
+            contentType: res.headers.get('content-type') || '',
+            finishReason: parsed.finishReason || '', rawPreview
+          });
+        } catch (_) {}
+
+        lastErr = new Error(parsed.finishReason === 'length' ? 'BAI_EMPTY_LENGTH' : 'BAI_EMPTY');
+        if (streamMode) continue;
+      } catch (e) {
+        lastErr = e;
+        if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT/.test(String(e?.message || e))) throw e;
+        /* Cho phép thử transport/auth tiếp theo với lỗi nội dung hoặc gateway. */
+      }
+    }
+  }
+  throw lastErr || new Error('BAI_FAIL');
+}
+
+async function diagnoseBaiConnection(apiKey = null) {
+  const key = String(apiKey || BAI_API_KEY || '').trim();
+  if (!key) throw new Error('NO_BAI_KEY');
+
+  /* Kiểm tra đúng đường gọi thực tế trước: POST /chat/completions.
+     GET /models chỉ là kiểm tra bổ sung, không được làm nút test báo lỗi giả khi chat endpoint vẫn chạy. */
+  const text = await callDeepSeekBai('Trả lời ngắn gọn đúng một từ: OK', {
+    json: false, temperature: 0, maxTokens: 2048, apiKey: key
+  });
+  const last = (typeof window !== 'undefined' && window.__IDECO_HUYEN_PRIMARY_AI_LAST__) || {};
+
+  let modelInfo = { ids: [], authMode: last.authMode || 'bearer' };
+  let modelsCheckSkipped = false;
+  try {
+    modelInfo = await baiListModels(key);
+    if (modelInfo.ids.length && !modelInfo.ids.includes(BAI_MODEL_ID)) {
+      const e = new Error(`BAI_MODEL_NOT_AVAILABLE — ${BAI_MODEL_ID}`);
+      e.availableModels = modelInfo.ids.slice(0, 30);
+      throw e;
+    }
+  } catch (e) {
+    if (/BAI_MODEL_NOT_AVAILABLE/.test(String(e?.message || e))) throw e;
+    modelsCheckSkipped = true;
+  }
+
+  return {
+    ok: true, text, authMode: last.authMode || modelInfo.authMode || 'bearer',
+    modelCount: modelInfo.ids.length, modelsCheckSkipped
+  };
+}
+
+/* Chế độ Huyền: model BGĐ chọn là AI chính.
+   - DeepSeek V4 Flash/B.AI lỗi -> chuyển ngay Gemini 3.7 Flash qua Kie.ai.
+   - Gemini của Huyền = Gemini 3.7 Flash Kie.ai, KHÔNG dùng Gemini 3.6.
+*/
+async function callHuyenPrimaryAI(prompt, { json = true, temperature = 0.10, maxTokens = 4200, timeoutMs = 42000, fallbackTimeoutMs = 55000 } = {}) {
+  const provider = normalizeHuyenAiProvider(HUYEN_PRIMARY_AI_PROVIDER);
+  if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) {
+    try {
+      return await callDeepSeekBai(prompt, { json, temperature, maxTokens, timeoutMs });
+    } catch (deepseekErr) {
+      console.warn('[HUYEN] DeepSeek V4 Flash/B.AI lỗi, tự chuyển Gemini 3.7 Flash/Kie.ai:', deepseekErr);
+      try {
+        window.__IDECO_HUYEN_BAI_FALLBACK__ = { at: Date.now(), reason: String(deepseekErr?.message || deepseekErr) };
+      } catch (_) {}
+      return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
+    }
+  }
+  return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
+}
+
+
+/* V9.8 — chống đứt giữa chừng: chỉ tự nối lại 1 lần với lỗi tạm thời.
+   Không retry lỗi key/quyền 401/403 để tránh tốn credit vô ích. */
+function isHuyenTransientAiError(err) {
+  const m = String(err?.message || err || '');
+  if (/NO_KEY|401|403|permission|denied|invalid.?key/i.test(m)) return false;
+  return /timeout|abort|network|failed to fetch|load failed|429|408|5\d\d|empty|bad_json|all_ai_failed|temporar|connection|fetch/i.test(m);
+}
+async function waitHuyenNetworkBriefly(maxMs = 12000) {
+  if (typeof navigator === 'undefined' || navigator.onLine !== false) return;
+  await new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      try { window.removeEventListener('online', finish); } catch (_) {}
+      resolve();
+    };
+    try { window.addEventListener('online', finish, { once: true }); } catch (_) {}
+    setTimeout(finish, maxMs);
+  });
+}
+async function callHuyenPrimaryAIStable(prompt, opts = {}) {
+  let lastErr = null;
+  const retryCount = Math.max(1, Math.min(2, Number(opts.retryCount || 2)));
+  const callOpts = { ...opts };
+  delete callOpts.retryCount;
+  for (let attempt = 1; attempt <= retryCount; attempt++) {
+    try {
+      await waitHuyenNetworkBriefly();
+      return await callHuyenPrimaryAI(prompt, callOpts);
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= retryCount || !isHuyenTransientAiError(e)) throw e;
+      try {
+        window.__IDECO_HUYEN_RECONNECT__ = { at: Date.now(), attempt: attempt + 1, reason: String(e?.message || e) };
+      } catch (_) {}
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+  }
+  throw lastErr || new Error('HUYEN_RECONNECT_FAILED');
+}
+
 /* ---------------- HUYỀN TURBO — Gemini 3.7 Flash qua Kie.ai ----------------
    Chỉ dùng cho màn hình Huyền gợi ý khi người dùng chủ động BẬT Turbo.
-   Không thay đổi 3 API Gemini dự phòng của chế độ thường.
+   Turbo tách riêng; khi Turbo lỗi sẽ rơi về AI chính do BGĐ chọn, rồi mới dùng dự phòng nếu cần.
 */
 const KIE_TURBO_API_KEY = "6a11cd4b360b77e7cd515b8296a00e6a";
 const KIE_TURBO_ENDPOINT = 'https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:streamGenerateContent';
@@ -486,7 +880,7 @@ function extractKieGeminiText(payload) {
   return out.trim();
 }
 
-async function callHuyenTurbo(prompt, { json = true } = {}) {
+async function callHuyenTurbo(prompt, { json = true, timeoutMs = 55000 } = {}) {
   if (!KIE_TURBO_API_KEY) throw new Error('NO_TURBO_KEY');
 
   const body = {
@@ -494,16 +888,13 @@ async function callHuyenTurbo(prompt, { json = true } = {}) {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       ...(json ? { responseMimeType: 'application/json' } : {}),
-      thinkingConfig: {
-        includeThoughts: true,
-        thinkingLevel: 'high'
-      }
+      /* FAST: bỏ chế độ suy luận high để Huyền Turbo trả kết quả nhanh hơn. */
     }
   };
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 90000);
-  let res;
+  const timer = setTimeout(() => ctl.abort(), Math.max(8000, Number(timeoutMs) || 55000));
+  let res, rawText = '';
   try {
     res = await fetch(KIE_TURBO_ENDPOINT, {
       method: 'POST',
@@ -514,17 +905,19 @@ async function callHuyenTurbo(prompt, { json = true } = {}) {
       body: JSON.stringify(body),
       signal: ctl.signal
     });
+    rawText = await res.text();
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('TURBO_TIMEOUT');
+    throw e;
   } finally { clearTimeout(timer); }
 
   if (!res.ok) {
-    let detail = '';
-    try { detail = (await res.text()).slice(0, 600); } catch (e) {}
+    const detail = String(rawText || '').slice(0, 600);
     const err = new Error(`TURBO_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
     err.status = res.status;
     throw err;
   }
 
-  const rawText = await res.text();
   let answer = '';
 
   /* Kie có thể trả SSE (data: {...}) hoặc JSON/JSON-array tùy gateway. */
@@ -618,10 +1011,20 @@ async function callGemini(prompt, { model = 'gemini-3.6-flash', json = true, too
 
 function safeJson(txt, fallback) {
   if (!txt) return fallback;
-  let t = txt.replace(/```json/gi, '').replace(/```/g, '').trim();
-  try { return JSON.parse(t); } catch (e) {}
+  let t = String(txt).replace(/```json/gi, '').replace(/```/g, '').trim();
+  const tries = [t];
   const m = t.match(/[\{\[][\s\S]*[\}\]]/);
-  if (m) { try { return JSON.parse(m[0]); } catch (e) {} }
+  if (m && m[0] !== t) tries.push(m[0]);
+  for (let x of tries) {
+    try { return JSON.parse(x); } catch (e) {}
+    try {
+      x = x
+        .replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
+        .replace(/,\s*([}\]])/g, '$1')
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
+      return JSON.parse(x);
+    } catch (e) {}
+  }
   return fallback;
 }
 
@@ -808,11 +1211,35 @@ function normalizeKnowledgeEntries(d) {
     .sort((a,b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }
 
-async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
+/* Cache Kho kiến thức 5 phút: mở nhiều khách liên tiếp không phải đọc Firebase lại mỗi lần. */
+const HUYEN_KB_CACHE = { at: 0, data: null };
+async function getHuyenKnowledgeCached() {
+  const now = Date.now();
+  if (HUYEN_KB_CACHE.data !== null && (now - HUYEN_KB_CACHE.at) < 300000) return HUYEN_KB_CACHE.data;
+  let raw = null;
+  try { raw = await dbGet('settings/aiHandlingKnowledge'); } catch (e) { raw = null; }
+  HUYEN_KB_CACHE.data = raw;
+  HUYEN_KB_CACHE.at = now;
+  return raw;
+}
+
+async function analyzeLatestCustomerStrategy(customer, { turbo = false, mode = 'fast' } = {}) {
   if (!customer) throw new Error('NO_CUSTOMER');
+  const analysisMode = mode === 'deep' ? 'deep' : 'fast';
+  const isDeepMode = analysisMode === 'deep';
+  const modeCfg = isDeepMode ? {
+    appointments: 20, reportChars: 13000, feedbackChars: 6500,
+    kbRelevant: 6, kbNewest: 2, kbMax: 8, kbItemChars: 5000, kbTotalChars: 22000,
+    maxTokens: 6500, repairTokens: 2200, timeoutMs: 95000, fallbackTimeoutMs: 85000, retryCount: 2
+  } : {
+    /* QUICK thật sự: context rất gọn + output ngắn + cắt model chậm sớm. */
+    appointments: 4, reportChars: 2800, feedbackChars: 1400,
+    kbRelevant: 1, kbNewest: 0, kbMax: 1, kbItemChars: 1300, kbTotalChars: 1600,
+    maxTokens: 1350, repairTokens: 650, timeoutMs: 15000, fallbackTimeoutMs: 19000, retryCount: 1
+  };
 
   /*
-     HUYỀN SMART TIMELINE V2
+     HUYỀN SMART SALES ADVISOR V5 — 2 CHẾ ĐỘ NHANH / SÂU + BÁM DỮ LIỆU
      - Không tăng thêm một lượt gọi AI: vẫn chỉ 1 lượt phân tích chính (Turbo hoặc AI thường).
      - Tính trước mốc thời gian bằng JavaScript để AI không phải tự đoán ngày/thời lượng.
      - Nhận diện tín hiệu từ chối / trì hoãn / yêu cầu thương lượng trước khi gửi AI.
@@ -845,10 +1272,10 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
   };
 
   /* ---------- 1) DỰNG TIMELINE CHÍNH XÁC TỪ DỮ LIỆU CÓ THẬT ---------- */
-  const appts = (Array.isArray(customer.appointments) ? customer.appointments : []).slice(-30).map(a => ({
+  const appts = (Array.isArray(customer.appointments) ? customer.appointments : []).slice(-modeCfg.appointments).map(a => ({
     date: a?.date || '',
     time: a?.time || '',
-    content: clipText(a?.content, 1000),
+    content: clipText(a?.content, 450),
     isCompleted: !!a?.isCompleted
   }));
 
@@ -963,18 +1390,28 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
 
   /* ---------- 3) CHỌN KHO KIẾN THỨC LIÊN QUAN NHẤT, TRÁNH NHỒI TOÀN BỘ ---------- */
   let kbRaw = null;
-  try { kbRaw = await dbGet('settings/aiHandlingKnowledge'); } catch (e) { kbRaw = null; }
+  if (isDeepMode) {
+    kbRaw = await getHuyenKnowledgeCached();
+  } else if (HUYEN_KB_CACHE.data !== null) {
+    kbRaw = HUYEN_KB_CACHE.data;
+  } else {
+    /* Quick mode không được đứng chờ Firebase lâu. Vẫn khởi động tải nền để lần sau có cache. */
+    kbRaw = await Promise.race([
+      getHuyenKnowledgeCached().catch(() => null),
+      new Promise(resolve => setTimeout(() => resolve(null), 900))
+    ]);
+  }
   const kb = normalizeKnowledgeEntries(kbRaw);
   const stopWords = new Set(['cua','cho','voi','nhung','cac','ban','khach','hang','nhan','vien','cong','ty','ideco','nay','kia','mot','nhieu','trong','ngoai','khi','neu','thi','la','va','de','duoc','dang','da','se','ve','tai','tu','theo','can','nen','hay','phai']);
   const contextTerms = Array.from(new Set(
     foldVN([customer.name, customer.type, customer.report, customer.customerFeedback, commercialRequests.join(' ')].join(' '))
       .split(/[^a-z0-9]+/)
       .filter(x => x.length >= 3 && !stopWords.has(x))
-  )).slice(0, 140);
+  )).slice(0, 90);
 
   const scoredKb = kb.map((x, index) => {
     const title = foldVN(x.title);
-    const content = foldVN(x.content).slice(0, 14000);
+    const content = foldVN(x.content).slice(0, 6000);
     let score = 0;
     for (const term of contextTerms) {
       if (title.includes(term)) score += 5;
@@ -990,22 +1427,27 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false } = {}) {
     if (!key || seenKb.has(key)) return;
     seenKb.add(key); selectedKb.push(x);
   };
-  scoredKb.filter(x => x._score > 0).slice(0, 10).forEach(pushKb);
-  kb.slice(0, 4).forEach(pushKb); // luôn giữ một số mục mới nhất để tránh bỏ sót hướng dẫn vừa cập nhật
-  const kbForPrompt = selectedKb.slice(0, 12);
+  scoredKb.filter(x => x._score > 0).slice(0, modeCfg.kbRelevant).forEach(pushKb);
+  kb.slice(0, modeCfg.kbNewest).forEach(pushKb); // giữ mục mới nhất để không bỏ sót hướng dẫn vừa cập nhật
+  const kbForPrompt = selectedKb.slice(0, modeCfg.kbMax);
   let knowledgeText = kbForPrompt.map((x, i) => {
     let updated = '';
     try { updated = x.updatedAt || x.createdAt ? new Date(x.updatedAt || x.createdAt).toISOString() : ''; } catch (e) {}
-    return `\n[Kiến thức nội bộ ${i+1}]\nTiêu đề: ${clipText(x.title, 250)}\nCập nhật: ${updated || 'không rõ'}\nMức liên quan sơ bộ: ${x._score || 0}\nNội dung:\n${clipText(x.content, 7000)}`;
+    return `\n[Kiến thức nội bộ ${i+1}]\nTiêu đề: ${clipText(x.title, 250)}\nCập nhật: ${updated || 'không rõ'}\nMức liên quan sơ bộ: ${x._score || 0}\nNội dung:\n${clipText(x.content, modeCfg.kbItemChars)}`;
   }).join('\n');
-  if (knowledgeText.length > 36000) knowledgeText = knowledgeText.slice(0, 36000) + '\n[Đã lược bớt Kho kiến thức để giữ phân tích ổn định]';
+  if (knowledgeText.length > modeCfg.kbTotalChars) knowledgeText = knowledgeText.slice(0, modeCfg.kbTotalChars) + '\n[Đã lược bớt Kho kiến thức theo chế độ phân tích đã chọn]';
 
-  /* ---------- 4) PROMPT CỐ VẤN: EVIDENCE -> TIMELINE -> PHẢN ĐỐI -> CHỐT ---------- */
-  const prompt = `
+  /* ---------- 4) PROMPT CỐ VẤN: EVIDENCE -> TIMELINE -> PHẢN ĐỐI -> CHỐT ----------
+     V4 FAST: giảm mạnh context/token, ưu tiên hành động chốt quan trọng; chỉ giữ Kho kiến thức liên quan nhất + cache 5 phút.
+  */
+  const deepPrompt = `
 Bạn là HUYỀN — CỐ VẤN KINH DOANH CẤP CAO của IDECO, được Chú Triết đào tạo để hỗ trợ nhân viên xử lý tình huống khách hàng trong ngành dược/nhà thuốc.
 
 MỤC TIÊU DUY NHẤT:
 Đọc hồ sơ có thật + mốc thời gian do hệ thống tính + phản hồi khách hàng + lịch hẹn + Kho kiến thức nội bộ phù hợp, rồi đưa ra HƯỚNG XỬ LÝ TỐT NHẤT để tiến gần tới hợp tác/chốt Sales nhưng vẫn đúng thẩm quyền, đúng dữ liệu, không tự bịa chính sách và không ép khách.
+
+CHẾ ĐỘ PHÂN TÍCH ĐƯỢC NHÂN VIÊN CHỌN: ${isDeepMode ? 'PHÂN TÍCH SÂU — chấp nhận chờ lâu hơn để đọc nhiều ngữ cảnh, giải thích kỹ nguyên nhân, phản đối, kịch bản và phương án chốt.' : 'PHÂN TÍCH NHANH — ưu tiên trả kết quả sớm, tập trung 3-4 điểm quyết định nhất và hành động có thể làm ngay; tránh diễn giải dài hoặc lặp ý.'}
+${isDeepMode ? '- Với chế độ SÂU: khai thác đầy đủ các bằng chứng quan trọng, 5-7 hướng xử lý khi có đủ căn cứ, kịch bản trao đổi chi tiết hơn và phương án B/C nếu cần.' : '- Với chế độ NHANH: mỗi mục viết gọn nhưng cụ thể; ưu tiên rào cản chính, 3 hành động đầu tiên, câu hỏi khóa và cam kết nhỏ nhất để chốt.'}
 
 NGUYÊN TẮC BẰNG CHỨNG:
 - Mọi kết luận quan trọng phải dựa trên dữ liệu có trong hồ sơ hoặc kiến thức nội bộ được cung cấp.
@@ -1022,8 +1464,8 @@ HỒ SƠ KHÁCH HÀNG MỚI NHẤT:
 - Trạng thái giao dịch: ${clipText(statusText, 300)}
 - Ngày bắt đầu giao dịch ghi nhận: ${clipText(customer.transactionDate, 100)}
 - Thời điểm lưu/cập nhật hồ sơ gần nhất: ${savedAt || '(không rõ)'}
-- Nội dung báo cáo mới nhất:\n${clipText(customer.report || '(trống)', 16000)}
-- Phản hồi khách hàng:\n${clipText(customer.customerFeedback || '(trống)', 9000)}
+- Nội dung báo cáo mới nhất:\n${clipText(customer.report || '(trống)', modeCfg.reportChars)}
+- Phản hồi khách hàng:\n${clipText(customer.customerFeedback || '(trống)', modeCfg.feedbackChars)}
 - Lịch hẹn / bước tiếp theo:\n${JSON.stringify(appts)}
 
 MỐC THỜI GIAN DO HỆ THỐNG TÍNH SẴN — KHÔNG TỰ TÍNH LẠI NẾU KHÔNG CẦN:
@@ -1049,36 +1491,112 @@ QUY TRÌNH PHÂN TÍCH BẮT BUỘC:
 11. BGĐ/CHÚ TRIẾT: Chỉ đề nghị "Trao đổi với Chú Triết ngay" khi có ít nhất một lý do cụ thể: chính sách ngoài thẩm quyền, khách chuỗi/khách lớn, yêu cầu thương mại đặc biệt, nguy cơ mất khách đáng kể, xung đột chính sách, hoặc nhiều vòng không tiến triển cần quyết định chiến lược.
 12. CÂU NÓI GỢI Ý: Phải tự nhiên, tôn trọng khách, không gây áp lực quá mức, không nói quá công dụng/sản phẩm, không hứa điều chưa được duyệt.
 13. KẾT LUẬN: Phải trả lời rõ "Bây giờ nên làm gì trước tiên?", "Mục tiêu của lần liên hệ tiếp theo là gì?", "Điều gì cần hỏi thêm?", và "Khi nào cần dừng/đổi chiến lược?".
+14. ĐỘ SÂU NHƯNG NHANH: Không trả lời chung chung, nhưng tránh diễn giải lặp. Tập trung 4-5 hành động có tác động lớn nhất; mỗi hành động phải có lý do + mục tiêu + câu gợi ý nếu phù hợp.
+15. TÂM LÝ KHÁCH HÀNG: Từ lời khách và diễn biến giao dịch, đánh giá thận trọng khách đang quan tâm thật, trì hoãn, so sánh, phòng thủ, thiếu niềm tin, thiếu thẩm quyền hay chưa thấy đủ giá trị. Nếu chỉ là suy luận phải ghi rõ là suy luận, không biến suy luận thành sự thật.
+16. CHỐT SALES THỰC TẾ: Không chỉ nói “theo dõi thêm”. Phải xác định một CAM KẾT NHỎ NHẤT cụ thể có thể xin ở lần tiếp theo, câu hỏi khóa để tiến tới quyết định, dấu hiệu mua hàng cần quan sát và phương án B nếu khách chưa đồng ý.
+17. PHONG CÁCH: Viết tiếng Việt tự nhiên, sâu sắc, giống một quản lý kinh doanh giàu kinh nghiệm đang góp ý trực tiếp cho nhân viên. Chi tiết nhưng không lặp ý, không lý thuyết suông, không dùng những câu sáo rỗng nếu hồ sơ không hỗ trợ.
 ${isNotSuccessful ? '\nLƯU Ý RIÊNG HỒ SƠ NÀY: Có dấu hiệu chưa thành công/từ chối. Hãy đánh giá khả năng phục hồi: từ chối thật hay trì hoãn; nguyên nhân có căn cứ; điều kiện nào mới đáng tái tiếp cận; và tránh lặp lại cách chào cũ nếu đã không hiệu quả.\n' : ''}
 
 TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 {
-  "situationSummary":"Tóm tắt tình huống hiện tại 3-5 câu, có dẫn mốc thời gian quan trọng nếu có",
+  "situationSummary":"Tóm tắt tình huống hiện tại 4-6 câu, dẫn đúng chi tiết và mốc thời gian quan trọng",
   "stage":"Giai đoạn Sales hiện tại",
   "priority":"Cao|Trung bình|Thấp",
-  "mainBarrier":"Rào cản gốc hoặc 'Chưa đủ dữ liệu để xác định'",
-  "dealHealth":{"score":0,"label":"Tốt|Có cơ hội nhưng cần xử lý|Đang chững|Nguy cơ mất|Chưa đủ dữ liệu","basis":"Lý do ngắn dựa trên bằng chứng"},
-  "timelineAssessment":"Đánh giá cụ thể mốc thời gian, số ngày, lịch quá hạn/sắp tới và nhịp chăm sóc",
-  "opportunities":["Cơ hội có căn cứ"],
-  "risks":["Rủi ro có căn cứ"],
+  "mainBarrier":"Phân tích rào cản gốc 2-4 câu; tách dữ kiện và suy luận; nếu thiếu thì nói rõ chưa đủ dữ liệu",
+  "salesDiagnosis":"Phân tích 4-6 câu: khách đang ở đâu trong quyết định mua, điểm nghẽn thật sự, vì sao cách tiếp cận hiện tại có/không hiệu quả và đòn bẩy nào đáng thử nhất",
+  "customerMindset":"Đánh giá 3-5 câu về tâm thế/ý định của khách dựa trên lời nói và hành vi đã ghi nhận; ghi rõ phần nào chỉ là suy luận",
+  "dealHealth":{"score":0,"label":"Tốt|Có cơ hội nhưng cần xử lý|Đang chững|Nguy cơ mất|Chưa đủ dữ liệu","basis":"Giải thích 2-4 câu dựa trên bằng chứng cụ thể"},
+  "timelineAssessment":"Đánh giá 3-5 câu về mốc thời gian, số ngày, lịch quá hạn/sắp tới, nhịp chăm sóc và hệ quả đối với bước tiếp theo",
+  "opportunities":["${isDeepMode ? '4-6' : '2-3'} cơ hội có căn cứ, mỗi ý đủ cụ thể để hành động"],
+  "risks":["${isDeepMode ? '4-6' : '2-3'} rủi ro có căn cứ và cách tránh nếu có thể"],
   "objectionHandling":[
     {"objection":"Phản đối/từ chối/yêu cầu cụ thể","evidence":"Dữ liệu gốc nào cho thấy điều này","classification":"Từ chối thật|Trì hoãn lịch sự|Yêu cầu thương lượng|Thiếu thông tin|Chưa gặp người quyết định|Đang ưu tiên nhà cung cấp khác|Khác","clarifyingQuestion":"Câu hỏi cần hỏi để hiểu đúng","responseStrategy":"Cách xử lý tốt nhất","resolvedSignal":"Dấu hiệu cho thấy đã xử lý được"}
   ],
   "negotiationPlan":[
     {"request":"Yêu cầu/điều kiện của khách","authority":"Có thể xử lý theo dữ liệu đã có|Cần Chú Triết-BGĐ duyệt|Chưa đủ dữ liệu","recommendedResponse":"Cách phản hồi","approvalNeeded":"Nếu cần duyệt, ghi chính xác điều cần xin; nếu không thì để trống"}
   ],
-  "closingPlan":{"objective":"Mục tiêu cụ thể của bước chốt tiếp theo","minimumCommitment":"Cam kết nhỏ nhất cần đạt ở lần liên hệ tới","valueAngle":"Giá trị nên nhấn mạnh có căn cứ","successSignal":"Dấu hiệu khách đang tiến gần hợp tác","fallback":"Nếu khách vẫn chưa đồng ý thì chuyển sang phương án nào"},
+  "closingPlan":{"objective":"Mục tiêu cụ thể của bước chốt tiếp theo, giải thích rõ vì sao chọn mục tiêu này","minimumCommitment":"Cam kết nhỏ nhất cần đạt ở lần liên hệ tới và cách xin cam kết","valueAngle":"Giá trị nên nhấn mạnh có căn cứ trong hồ sơ/kho nội bộ","successSignal":"Các dấu hiệu cụ thể cho thấy khách đang tiến gần hợp tác","fallback":"Phương án B cụ thể nếu khách vẫn chưa đồng ý"},
+  "questionsToAsk":["${isDeepMode ? '4-6' : '2-3'} câu hỏi chẩn đoán/chốt cần hỏi khách, ưu tiên câu hỏi làm lộ nhu cầu, người quyết định, so sánh giá, thời điểm và điều kiện mua"],
+  "nextConversationPlan":{"opening":"Cách mở đầu tự nhiên, bám lịch sử trao đổi","discovery":"Nội dung/câu hỏi cần khai thác","valueBridge":"Cách nối nhu cầu thật của khách với giá trị IDECO có căn cứ","close":"Cách xin cam kết nhỏ nhất tiếp theo, không gây áp lực"},
+  "whatNotToDo":["${isDeepMode ? '3-5' : '1-2'} điều không nên làm trong lần liên hệ tới vì có thể làm giảm khả năng chốt"],
   "recommendedActions":[
-    {"step":1,"action":"Việc cần làm theo thứ tự ưu tiên","reason":"Vì sao","goal":"Mục tiêu","suggestedScript":"Câu gợi ý có thể dùng với khách hoặc để trống"}
+    {"step":1,"action":"${isDeepMode ? '5-7' : '3-4'} việc cần làm theo thứ tự ưu tiên; mô tả đủ cụ thể để nhân viên làm ngay","reason":"Giải thích 1-3 câu vì sao bước này quan trọng dựa trên hồ sơ","goal":"Kết quả đo được hoặc tín hiệu cần đạt","suggestedScript":"Câu gợi ý tự nhiên 1-3 câu có thể dùng với khách; để trống nếu không phù hợp"}
   ],
-  "missingInfo":["Thông tin còn thiếu cần khai thác"],
+  "missingInfo":["${isDeepMode ? '3-5' : '1-3'} thông tin còn thiếu cần khai thác, ưu tiên thông tin ảnh hưởng trực tiếp đến quyết định mua"],
   "managementSupport":"Nội dung BGĐ nên hỗ trợ/duyệt hoặc 'Chưa cần hỗ trợ đặc biệt'",
   "nextFollowUp":"Thời điểm và cách theo dõi tiếp theo, bám đúng lịch đã có",
   "relationshipDecision":"Tiếp tục trao đổi ngay|Tiếp tục nhưng đổi cách tiếp cận|Chờ đến lịch hẹn đã chốt|Tạm dừng và tái kích hoạt sau|Trao đổi với Chú Triết ngay",
   "talkToTriet":{"needed":true,"reason":"Lý do có căn cứ","ask":"Nội dung cụ thể cần xin ý kiến/duyệt; nếu không cần để trống"},
   "knowledgeUsed":["Đúng tiêu đề kiến thức nội bộ đã thực sự sử dụng"],
-  "finalAdvice":"Kết luận ngắn gọn: việc số 1 cần làm ngay + mục tiêu + giới hạn cần lưu ý"
+  "finalAdvice":"Kết luận 4-6 câu như lời góp ý của quản lý: việc số 1 cần làm ngay, vì sao, mục tiêu chốt, dấu hiệu thành công, phương án dự phòng và giới hạn không được tự hứa"
 }`;
+
+  /* QUICK MODE V6 — prompt riêng, ngắn hơn rất nhiều để ưu tiên thời gian phản hồi.
+     Chỉ yêu cầu các trường thực sự cần để nhân viên hành động ngay. */
+  const fastPrompt = `
+Bạn là HUYỀN — cố vấn bán hàng của IDECO. Hãy đọc dữ liệu thật dưới đây và đưa ra góp ý NHANH, CỤ THỂ, DỄ ĐỌC để nhân viên biết ngay nên làm gì ở lần liên hệ tiếp theo.
+
+MỤC TIÊU:
+- Không viết lý thuyết dài.
+- Không bịa giá, chiết khấu, công nợ, đổi trả, chính sách hoặc phản hồi khách.
+- Phân biệt rõ dữ kiện và suy luận.
+- Ưu tiên 3 việc có tác động lớn nhất tới khả năng tiến gần chốt.
+- Nếu chưa đủ dữ liệu, nói rõ cần hỏi gì.
+- Văn bản tiếng Việt PHẢI có khoảng trắng đúng giữa các từ, dấu câu chuẩn, câu ngắn và rõ.
+- Mỗi trường nên 1-3 câu; chỉ "finalAdvice" tối đa 4 câu.
+
+KHÁCH HÀNG:
+Tên: ${clipText(customer.name, 300)}
+Người liên hệ: ${clipText(customer.contactPerson, 180)}
+Loại khách: ${clipText(customer.type, 120)}
+Trạng thái: ${clipText(statusText, 180)}
+Báo cáo mới nhất:
+${clipText(customer.report || '(trống)', modeCfg.reportChars)}
+Phản hồi khách hàng:
+${clipText(customer.customerFeedback || '(trống)', modeCfg.feedbackChars)}
+Các lịch hẹn gần nhất:
+${JSON.stringify(appts)}
+
+MỐC THỜI GIAN TÓM TẮT:
+${JSON.stringify({
+  recordAgeDays: timelineSummary.recordAgeDays,
+  daysSinceLastRecordActivity: timelineSummary.daysSinceLastRecordActivity,
+  latestOverdueAppointment: timelineSummary.latestOverdueAppointment,
+  nextOpenAppointment: timelineSummary.nextOpenAppointment
+})}
+
+TÍN HIỆU SƠ BỘ:
+${JSON.stringify(signalFlags)}
+
+KHO KIẾN THỨC LIÊN QUAN NHẤT (nếu tải kịp):
+${knowledgeText || '(Quick mode chưa có mục phù hợp hoặc đang tải nền)'}
+
+HÃY TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
+{
+  "situationSummary":"2-3 câu tóm tắt đúng tình hình hiện tại",
+  "stage":"Giai đoạn Sales ngắn gọn",
+  "priority":"Cao|Trung bình|Thấp",
+  "mainBarrier":"1-2 câu về rào cản chính; nếu là suy luận phải nói rõ",
+  "customerMindset":"1-2 câu đánh giá thận trọng tâm thế khách",
+  "questionsToAsk":["Tối đa 3 câu hỏi quan trọng nhất cần hỏi"],
+  "recommendedActions":[
+    {"step":1,"action":"Việc cần làm ngay","reason":"Vì sao","goal":"Kết quả cần đạt","suggestedScript":"Một câu có thể nói với khách"}
+  ],
+  "closingPlan":{
+    "objective":"Mục tiêu thực tế của lần liên hệ tới",
+    "minimumCommitment":"Cam kết nhỏ nhất cần xin khách",
+    "fallback":"Nếu khách chưa đồng ý thì làm gì"
+  },
+  "nextConversationPlan":{
+    "opening":"Một cách mở đầu ngắn, tự nhiên",
+    "discovery":"Điểm cần hỏi/khai thác nhất",
+    "close":"Câu xin cam kết nhỏ nhất"
+  },
+  "nextFollowUp":"Thời điểm/cách theo dõi tiếp nếu dữ liệu cho phép",
+  "finalAdvice":"3-4 câu kết luận: việc số 1 cần làm, điều phải hỏi, mục tiêu chốt và điều không được tự hứa"
+}`;
+
+  const prompt = isDeepMode ? deepPrompt : fastPrompt;
 
   let raw = '';
   let turboFailed = false;
@@ -1086,7 +1604,7 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 
   if (turbo) {
     try {
-      raw = await callHuyenTurbo(prompt, { json: true });
+      raw = await callHuyenTurbo(prompt, { json: true, timeoutMs: modeCfg.fallbackTimeoutMs });
       if (!safeJson(raw, null)) throw new Error('TURBO_BAD_JSON');
     } catch (e) {
       turboFailed = true;
@@ -1098,7 +1616,7 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 
   if (!turbo || turboFailed) {
     try {
-      raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.16 });
+      raw = await callHuyenPrimaryAIStable(prompt, { json: true, temperature: isDeepMode ? 0.08 : 0.05, maxTokens: modeCfg.maxTokens, timeoutMs: modeCfg.timeoutMs, fallbackTimeoutMs: modeCfg.fallbackTimeoutMs, retryCount: modeCfg.retryCount });
     } catch (normalErr) {
       const err = new Error('HUYEN_ALL_AI_FAILED');
       err.turboError = turboError;
@@ -1109,15 +1627,16 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
 
   let r = safeJson(raw, null);
   if (!r) {
-    const repairPrompt = `Chuyển nội dung sau thành đúng JSON theo cấu trúc đã yêu cầu. Không thêm markdown, không bịa dữ liệu, giữ nguyên nội dung phân tích:\n${clipText(raw, 14000)}`;
+    const repairPrompt = `Sửa NHANH nội dung sau thành JSON hợp lệ. Không thêm phân tích mới, không markdown, không bịa dữ liệu. Chỉ sửa cấu trúc JSON:\n${clipText(raw, 8000)}`;
     try {
-      const repaired = await callGemini(repairPrompt, { model: 'gemini-3.6-flash', json: true, temperature: 0.03 });
+      const repaired = await callHuyenPrimaryAIStable(repairPrompt, { json: true, temperature: 0.01, maxTokens: modeCfg.repairTokens, timeoutMs: isDeepMode ? Math.min(modeCfg.timeoutMs, 32000) : 9000, fallbackTimeoutMs: isDeepMode ? Math.min(modeCfg.fallbackTimeoutMs, 32000) : 11000, retryCount: 1 });
       r = safeJson(repaired, null);
     } catch (e) {}
   }
   if (!r) throw new Error('AI_BAD_JSON');
 
   r._huyenMeta = {
+    analysisMode,
     turboRequested: !!turbo,
     turboFallback: !!turboFailed,
     analyzedAt: Date.now(),
@@ -1128,6 +1647,19 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   };
   return r;
 }
+
+/* Chuẩn hóa nhẹ văn bản Huyền trước khi hiển thị.
+   Không tự thêm khoảng trắng giữa các "từ" vì không thể đoán an toàn; lỗi dính chữ từ SSE đã được sửa tại parser. */
+function huyenDisplayText(v) {
+  return String(v ?? '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/([,.;:!?])(?=[A-Za-zÀ-ỹ])/g, '$1 ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 
 /* Doc noi dung PDF/Word de dua vao Kho kien thuc; chi luu TEXT, khong luu file nhi phan */
 async function extractKnowledgeFileText(file) {
@@ -1577,6 +2109,9 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
+  /* AI chính của Huyền: Gemini 3.7 Flash/Kie.ai hoặc DeepSeek V4 Flash/B.AI */
+  const [huyenPrimaryAi, setHuyenPrimaryAi] = useState(HUYEN_AI_PROVIDERS.GEMINI);
+  const [baiApiKey, setBaiApiKeyState] = useState(BAI_DEFAULT_API_KEY);
   /* BGĐ kiểm soát quyền dùng Huyền Turbo / credit qua Firebase */
   const [turboControl, setTurboControl] = useState({ allowed: true, defaultOn: false, locked: false });
 
@@ -1587,6 +2122,7 @@ function App() {
   const [quickReportCustomer, setQuickReportCustomer] = useState(null);
   /* Hồ sơ được mở trực tiếp từ nút "Huyền gợi ý" ngoài danh sách khách hàng */
   const [advisorCustomer, setAdvisorCustomer] = useState(null);
+  const [advisorMode, setAdvisorMode] = useState('fast'); // fast = xanh, deep = đỏ
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [notification, setNotification] = useState(null);
@@ -1736,6 +2272,21 @@ function App() {
       };
       apply();
     });
+    const offHuyenAi = dbOnValue('settings/huyenAiConfig', (v) => {
+      const provider = normalizeHuyenAiProvider(v?.provider || HUYEN_AI_PROVIDERS.GEMINI);
+      const savedKey = String(v?.baiApiKey || '').trim();
+      const key = resolveBaiApiKey(savedKey);
+      setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
+      setBaiApiKeyState(key); setBaiApiKey(key);
+
+      /* Nếu Firebase còn đúng key mặc định cũ của bản trước thì nâng sang key mới một lần.
+         Key do quản trị tự nhập khác key cũ sẽ được giữ nguyên, không bị ghi đè. */
+      if (v && savedKey && BAI_LEGACY_DEFAULT_KEYS.has(savedKey)) {
+        dbSet('settings/huyenAiConfig', {
+          ...v, baiApiKey: BAI_DEFAULT_API_KEY, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now()
+        }).catch(() => {});
+      }
+    });
     const offTurboControl = dbOnValue('settings/huyenTurboControl', (v) => {
       const next = {
         allowed: v && typeof v.allowed === 'boolean' ? v.allowed : true,
@@ -1744,7 +2295,7 @@ function App() {
       };
       setTurboControl(next);
     });
-    return () => { offStaff(); offCust(); offPass(); offKey(); offTurboControl(); };
+    return () => { offStaff(); offCust(); offPass(); offKey(); offHuyenAi(); offTurboControl(); };
   }, []);
 
   /* Danh sach khach hang tu Excel: luu tren Firebase de moi may deu dung chung */
@@ -2189,6 +2740,40 @@ function App() {
     GEMINI_ACTIVE_KEY_INDEX = 0; GEMINI_KEY_COOLDOWN.clear();
     const count = vals.filter(Boolean).length;
     notify(count ? `Đã lưu ${count} API Gemini dự phòng — hệ thống sẽ tự chuyển khi key lỗi/hết quota` : 'Đã xóa các API key dự phòng', 'success');
+  };
+
+  const handleSaveHuyenAiConfig = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const provider = normalizeHuyenAiProvider(document.getElementById('huyenPrimaryAiInput')?.value || HUYEN_AI_PROVIDERS.GEMINI);
+    const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
+    if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH && !key) {
+      notify('Bạn chưa nhập API key B.AI cho DeepSeek V4 Flash.', 'error', 4500); return;
+    }
+    if (key && !/^sk-[A-Za-z0-9_-]{12,}$/.test(key)) {
+      notify('API key B.AI chưa đúng định dạng thông thường sk-…', 'error', 4500); return;
+    }
+    const payload = { provider, baiApiKey: key, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
+    const ok = await dbSet('settings/huyenAiConfig', payload);
+    if (!ok) { notify('Không lưu được lựa chọn AI Huyền lên Firebase.', 'error'); return; }
+    setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
+    setBaiApiKeyState(key); setBaiApiKey(key);
+    notify(provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
+      ? 'Đã chọn DeepSeek V4 Flash/B.AI làm AI chính cho Huyền. Nếu B.AI lỗi, Huyền tự chuyển Gemini 3.7 Flash/Kie.ai.'
+      : 'Đã chọn Gemini 3.7 Flash/Kie.ai làm AI chính cho Huyền.', 'success', 5200);
+  };
+
+  const handleTestBai = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
+    if (!key) { notify('Nhập API key B.AI trước khi kiểm tra.', 'error'); return; }
+    notify('Đang kiểm tra B.AI → deepseek-v4-flash → chat/completions…', 'info', 3200);
+    try {
+      const r = await diagnoseBaiConnection(key);
+      notify(`B.AI kết nối thành công · ${BAI_MODEL_ID} · ${BAI_BASE_URL} · xác thực ${r.authMode === 'x-api-key' ? 'x-api-key' : 'Bearer'} · phản hồi OK`, 'success', 6500);
+    } catch (e) {
+      console.error('[B.AI TEST]', e);
+      notify(`B.AI chưa kết nối được: ${baiFriendlyError(e)}`, 'error', 10000);
+    }
   };
 
   const handleSaveTurboControl = async () => {
@@ -3285,7 +3870,9 @@ function App() {
         targetWarning={targetWarning} setTargetWarning={setTargetWarning}
         quickReportCustomer={liveQuickReport} setQuickReportCustomer={setQuickReportCustomer}
         advisorCustomer={liveAdvisorCustomer} setAdvisorCustomer={setAdvisorCustomer}
+        advisorMode={advisorMode}
         turboControl={turboControl}
+        huyenPrimaryAi={huyenPrimaryAi}
         mgrUnlocked={mgrUnlocked} setMgrUnlocked={setMgrUnlocked}
         onSaveFeedback={handleSaveFeedback} onDeleteFeedback={handleDeleteFeedback}
         notify={notify}
@@ -3809,10 +4396,15 @@ function App() {
                             <I.Message width="12" height="12" /> Đã góp ý
                           </button>
                         )}
-                        <button onClick={(e) => { e.stopPropagation(); setAdvisorCustomer(c); }}
-                          title="Huyền sẽ giúp tư vấn tình huống khách hàng"
-                          className="btn huyen-advisor-entry-btn px-3 py-2 text-[11px]">
-                          <I.Sparkles width="13" height="13" /> Huyền sẽ giúp tư vấn tình huống khách hàng
+                        <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('deep'); setAdvisorCustomer(c); }}
+                          title="Phân tích sâu — đọc nhiều ngữ cảnh hơn và góp ý kỹ hơn, thời gian chờ lâu hơn"
+                          className="btn huyen-advisor-entry-btn px-3 py-2 text-[10.5px] max-w-[250px]">
+                          <I.Sparkles width="13" height="13" /> Huyền phân tích sâu-cần thời gian trên 3 phút
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('fast'); setAdvisorCustomer(c); }}
+                          title="Phân tích nhanh — ưu tiên trả kết quả sớm và các bước chốt quan trọng"
+                          className="btn huyen-advisor-fast-btn px-3 py-2 text-[10.5px] max-w-[175px]">
+                          <I.Sparkles width="13" height="13" /> Huyền gởi ý nhanh
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
                           className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px]">
@@ -4225,10 +4817,15 @@ function App() {
                               </span>
                             : <span className="text-[10.5px] font-bold uppercase tracking-wide text-slate-300">Chưa có góp ý</span>}
                           <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                            <button onClick={(e) => { e.stopPropagation(); setAdvisorCustomer(r); }}
-                              title="Huyền sẽ giúp tư vấn tình huống khách hàng"
-                              className="btn huyen-advisor-entry-btn px-3 py-2 text-[11px] shrink-0">
-                              <I.Sparkles width="13" height="13" /> Huyền sẽ giúp tư vấn tình huống khách hàng
+                            <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('deep'); setAdvisorCustomer(r); }}
+                              title="Phân tích sâu — đọc nhiều ngữ cảnh hơn và góp ý kỹ hơn, thời gian chờ lâu hơn"
+                              className="btn huyen-advisor-entry-btn px-3 py-2 text-[10.5px] max-w-[250px]">
+                              <I.Sparkles width="13" height="13" /> Huyền phân tích sâu-cần thời gian trên 3 phút
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('fast'); setAdvisorCustomer(r); }}
+                              title="Phân tích nhanh — ưu tiên trả kết quả sớm và các bước chốt quan trọng"
+                              className="btn huyen-advisor-fast-btn px-3 py-2 text-[10.5px] max-w-[175px]">
+                              <I.Sparkles width="13" height="13" /> Huyền gởi ý nhanh
                             </button>
                             <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(r); }}
                               className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px] shrink-0">
@@ -4251,7 +4848,7 @@ function App() {
                   <div className="w-10 h-10 rounded-xl bg-rose-50 text-crimson flex items-center justify-center"><I.Lock width="18" height="18" /></div>
                   <div>
                     <h3 className="font-display text-[17px] font-extrabold text-ink leading-tight">Cài đặt</h3>
-                    <p className="text-[11px] text-slate-400 font-semibold">Đổi mật khẩu · API key Gemini</p>
+                    <p className="text-[11px] text-slate-400 font-semibold">Đổi mật khẩu · chọn AI Huyền · API key</p>
                   </div>
                 </div>
                 <p className="text-[12.5px] text-slate-500 mb-5">Khu vực này được bảo vệ. Nhập mã bảo mật để mở.</p>
@@ -4290,6 +4887,53 @@ function App() {
                     <button onClick={handleChangePassword} className="btn w-full py-3.5 bg-ink text-white text-[13px] uppercase tracking-wider shadow-lift">
                       <I.Save width="16" height="16" /> Lưu mật khẩu
                     </button>
+                  </div>
+                </section>
+
+                {/* AI CHÍNH CHO HUYỀN */}
+                <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 rounded-xl bg-sky-50 text-brand flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
+                    <div>
+                      <h3 className="font-display text-[17px] font-extrabold text-ink">AI chính cho Huyền</h3>
+                      <p className="text-[11px] text-slate-400 font-semibold">Gemini 3.7 Flash · Kie.ai hoặc DeepSeek V4 Flash · B.AI</p>
+                    </div>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
+                    Chọn model dùng cho Huyền. Nếu chọn DeepSeek V4 Flash mà B.AI lỗi/timeout/quyền truy cập, hệ thống tự chuyển ngay sang Gemini 3.7 Flash qua Kie.ai để không gián đoạn công việc.
+                  </p>
+                  <div className="space-y-4">
+                    <Field label="MODEL AI CHÍNH">
+                      <select id="huyenPrimaryAiInput" className="fld" defaultValue={huyenPrimaryAi} key={`ai-${huyenPrimaryAi}`}>
+                        <option value={HUYEN_AI_PROVIDERS.GEMINI}>Gemini 3.7 Flash · Kie.ai</option>
+                        <option value={HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH}>DeepSeek V4 Flash · B.AI</option>
+                      </select>
+                    </Field>
+                    <Field label="API KEY B.AI — DEEPSEEK V4 FLASH">
+                      <input id="baiApiKeyInput" type="password" defaultValue={baiApiKey || ''} key={`bai-${baiApiKey}`} placeholder="sk-..." className="fld font-mono text-[13px]" autoComplete="off" />
+                    </Field>
+                    <div className="rounded-xl bg-sky-50 border border-sky-200 px-3.5 py-3 text-[11.5px] text-sky-900 leading-relaxed">
+                      <b>Model ID:</b> <span className="font-mono">deepseek-v4-flash</span> · <b>Base URL:</b> <span className="font-mono">https://api.b.ai/v1</span><br/>
+                      <b>Chat endpoint:</b> <span className="font-mono">https://api.b.ai/v1/chat/completions</span> · xác thực <b>Authorization: Bearer</b>.<br/>
+                      Kết nối ưu tiên <b>stream SSE</b> theo mẫu curl, tự gom <span className="font-mono">choices[].delta.content</span> và tự thử non-stream khi cần. DeepSeek V4 Flash là <b>text-only</b>.
+                    </div>
+                    {typeof location !== 'undefined' && location.protocol === 'file:' && (
+                      <div className="rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-3 text-[11.5px] text-amber-900 leading-relaxed">
+                        <b>Lưu ý:</b> ứng dụng đang mở bằng <span className="font-mono">file://</span>. Nếu B.AI báo lỗi mạng/CORS, đây là giới hạn gọi API trực tiếp từ trình duyệt; nút <b>Kiểm tra B.AI</b> sẽ báo rõ nguyên nhân.
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button onClick={handleTestBai} className="btn w-full py-3.5 bg-white border border-sky-200 text-brand text-[12px] font-extrabold">
+                        Kiểm tra B.AI
+                      </button>
+                      <button onClick={handleSaveHuyenAiConfig} className="btn w-full py-3.5 bg-brand text-white text-[12px] uppercase tracking-wider shadow-lift">
+                        <I.Save width="16" height="16" /> Lưu model + API key
+                      </button>
+                    </div>
+                    <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                      Đang chọn: <b>{huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : 'Gemini 3.7 Flash · Kie.ai'}</b>
+                      {baiApiKey ? ` · B.AI key ${maskBaiKey(baiApiKey)}` : ''}.
+                    </p>
                   </div>
                 </section>
 
@@ -4624,8 +5268,8 @@ function Popups({
   showTargetPopup, targetGoal, setTargetGoal, handleConfirmTarget,
   targetWarning, setTargetWarning,
   quickReportCustomer, setQuickReportCustomer,
-  advisorCustomer, setAdvisorCustomer,
-  turboControl,
+  advisorCustomer, setAdvisorCustomer, advisorMode,
+  turboControl, huyenPrimaryAi,
   mgrUnlocked, setMgrUnlocked,
   onSaveFeedback, onDeleteFeedback, notify
 }) {
@@ -4652,6 +5296,7 @@ function Popups({
 
   /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng; quyền dùng do BGĐ kiểm soát trong Cài đặt. */
   const turboPolicy = turboControl || { allowed: true, defaultOn: false, locked: false };
+  const normalAiLabel = 'chế độ thường';
   const [huyenTurbo, setHuyenTurbo] = useState(() => {
     try { return sessionStorage.getItem('ideco_huyen_turbo') === '1'; } catch (e) { return false; }
   });
@@ -4706,7 +5351,7 @@ function Popups({
       const msg = String(e && e.message || e);
       setAdvisorError(huyenTurbo
         ? 'Huyền đã thử Turbo và tự chuyển qua các API dự phòng nhưng vẫn chưa kết nối được. Bạn vui lòng thử lại sau ít phút.'
-        : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : 'Huyền đã thử các API dự phòng nhưng chưa phân tích được hồ sơ này. Bạn thử lại sau ít phút.'));
+        : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : `Huyền đã tự nối lại nhưng chưa hoàn tất phân tích bằng ${normalAiLabel} và phương án dự phòng. Bạn thử lại khi mạng ổn định hơn.`));
     } finally { setAdvisorBusy(false); }
   };
 
@@ -4714,6 +5359,22 @@ function Popups({
   const [directAdvisorBusy, setDirectAdvisorBusy] = useState(false);
   const [directAdvisorResult, setDirectAdvisorResult] = useState(null);
   const [directAdvisorError, setDirectAdvisorError] = useState('');
+  const [directAdvisorMinimized, setDirectAdvisorMinimized] = useState(false);
+
+  /* Mở khách hàng mới thì hiện popup đầy đủ; thu nhỏ không làm mất advisorCustomer nên request vẫn tiếp tục. */
+  useEffect(() => {
+    if (advisorCustomer) setDirectAdvisorMinimized(false);
+  }, [advisorCustomer ? advisorCustomer.id : null]);
+
+  const closeOrMinimizeDirectAdvisor = () => {
+    if (directAdvisorBusy) {
+      setDirectAdvisorMinimized(true);
+      notify && notify('Huyền vẫn đang phân tích ở góc màn hình. Bạn có thể tiếp tục làm việc khác.', 'info', 4500);
+      return;
+    }
+    setDirectAdvisorMinimized(false);
+    setAdvisorCustomer(null);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -4724,31 +5385,41 @@ function Popups({
       }
       setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
       try {
-        const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo });
+        const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo, mode: advisorMode });
         if (!cancelled) setDirectAdvisorResult(r);
       } catch (e) {
         if (cancelled) return;
         const msg = String(e && e.message || e);
         setDirectAdvisorError(huyenTurbo
-          ? 'Huyền đã thử Turbo và tự chuyển qua API dự phòng nhưng vẫn chưa kết nối được. Bạn thử lại sau ít phút.'
-          : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : 'Huyền đã thử các API dự phòng nhưng chưa phân tích được hồ sơ này. Bạn thử lại sau ít phút.'));
+          ? 'Huyền đã tự nối lại và chuyển qua API dự phòng nhưng kết nối vẫn chưa ổn định. Bạn bấm Thử phân tích lại khi mạng ổn định hơn.'
+          : (msg === 'NO_KEY' ? 'Chưa có API AI. Vào Hệ thống → Cài đặt AI để nhập API dự phòng.' : `Huyền chưa phân tích được bằng ${normalAiLabel} và phương án dự phòng. Bạn thử lại sau ít phút.`));
       } finally { if (!cancelled) setDirectAdvisorBusy(false); }
     };
     run();
     return () => { cancelled = true; };
-  }, [advisorCustomer ? advisorCustomer.id : null, advisorCustomer ? advisorCustomer.updatedAt : null, huyenTurbo]);
+  }, [advisorCustomer ? advisorCustomer.id : null, advisorCustomer ? advisorCustomer.updatedAt : null, advisorMode, huyenTurbo, huyenPrimaryAi]);
+
+  /* Nếu Huyền đang thu nhỏ, báo khi có kết quả/lỗi mà không kéo người dùng ra khỏi việc đang làm. */
+  useEffect(() => {
+    if (!advisorCustomer || !directAdvisorMinimized) return;
+    if (directAdvisorResult) {
+      notify && notify(`Huyền đã phân tích xong ${advisorCustomer.name}. Bấm khung Huyền ở góc màn hình để xem.`, 'success', 6500);
+    } else if (directAdvisorError && !directAdvisorBusy) {
+      notify && notify('Phiên phân tích bị gián đoạn sau khi đã tự nối lại. Bấm khung Huyền ở góc để thử lại.', 'warning', 6500);
+    }
+  }, [directAdvisorResult, directAdvisorError, directAdvisorBusy, directAdvisorMinimized]);
 
   const rerunDirectAdvisor = async () => {
     if (!advisorCustomer) return;
     setDirectAdvisorBusy(true); setDirectAdvisorResult(null); setDirectAdvisorError('');
     try {
-      const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo });
+      const r = await analyzeLatestCustomerStrategy(advisorCustomer, { turbo: huyenTurbo, mode: advisorMode });
       setDirectAdvisorResult(r);
     } catch (e) {
       const msg = String(e && e.message || e);
       setDirectAdvisorError(huyenTurbo
         ? 'Huyền Turbo chưa kết nối được Kie.ai Turbo 3.7 Flash. Huyền sẽ tự chuyển sang chế độ thường và các API dự phòng; bạn cũng có thể thử lại sau.'
-        : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : 'Huyền chưa phân tích được hồ sơ này. Kiểm tra kết nối/API key rồi thử lại.'));
+        : (msg === 'NO_KEY' ? 'Chưa có API key AI. Vào Hệ thống → Cài đặt AI để nhập key.' : `Huyền chưa phân tích được bằng ${normalAiLabel}. Kiểm tra kết nối/API key rồi thử lại.`));
     } finally { setDirectAdvisorBusy(false); }
   };
 
@@ -4942,7 +5613,7 @@ function Popups({
 
       {/* quick report */}
       {/* HUYỀN GỢI Ý — mở trực tiếp từ danh sách khách hàng, tự chạy ngay */}
-      <Modal open={!!advisorCustomer} z={1092} max="max-w-[96vw] min-h-[88vh]" onClose={() => setAdvisorCustomer(null)}>
+      <Modal open={!!advisorCustomer && !directAdvisorMinimized} z={1092} max="max-w-[96vw] min-h-[88vh]" onClose={closeOrMinimizeDirectAdvisor}>
         {advisorCustomer && (
           <div className="huyen-advisor-popup p-5 sm:p-6">
             <div className="flex items-start justify-between gap-3 mb-4">
@@ -4950,12 +5621,22 @@ function Popups({
                 <p className="text-[10.5px] font-extrabold uppercase tracking-[.12em] text-amber2 flex items-center gap-1.5">
                   <I.Sparkles width="13" height="13" /> AI cố vấn từ hồ sơ mới nhất + kho nội bộ
                 </p>
-                <h3 className="font-display text-[20px] font-extrabold text-ink mt-1 leading-tight">Thay mặt Chú Triết, Huyền gợi ý hướng xử lý...</h3>
+                <div className="flex flex-wrap items-center gap-2 mt-1">
+                  <h3 className="font-display text-[20px] font-extrabold text-ink leading-tight">Thay mặt Chú Triết, Huyền gợi ý hướng xử lý...</h3>
+                  <span className={`text-[10px] font-extrabold px-2.5 py-1 rounded-lg border uppercase tracking-wide ${advisorMode === 'deep' ? 'bg-rose-50 text-crimson border-rose-200' : 'bg-blue-50 text-brand border-blue-200'}`}>
+                    {advisorMode === 'deep' ? 'Phân tích sâu' : 'Phân tích nhanh'}
+                  </span>
+                </div>
                 <p className="text-[14.5px] sm:text-[16px] font-semibold text-slate-600 mt-2 leading-relaxed">
                   Huyền được Chú Triết đào tạo và hướng dẫn để hỗ trợ các bạn xử lý tình huống khách hàng - nên việc các bạn càng khai báo đúng sẽ giúp chúng ta dễ chốt Sales hơn.
                 </p>
               </div>
-              <button onClick={() => setAdvisorCustomer(null)} className="btn w-9 h-9 bg-paper text-slate-400 hover:text-crimson shrink-0"><I.X width="16" height="16" /></button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={() => setDirectAdvisorMinimized(true)} title="Thu nhỏ để tiếp tục làm việc" className="btn h-9 px-3 bg-amber-50 text-amber2 border border-amber-100 text-[11px] font-extrabold">
+                  <span className="text-[18px] leading-none -mt-1">−</span><span className="hidden sm:inline">Thu nhỏ</span>
+                </button>
+                <button onClick={closeOrMinimizeDirectAdvisor} title={directAdvisorBusy ? 'Thu nhỏ — không hủy phân tích đang chạy' : 'Đóng'} className="btn w-9 h-9 bg-paper text-slate-400 hover:text-crimson"><I.X width="16" height="16" /></button>
+              </div>
             </div>
 
             <div className={`rounded-2xl border p-3.5 mb-4 transition ${huyenTurbo ? 'border-amber-300 bg-amber-50/80' : 'border-line bg-white'}`}>
@@ -4963,7 +5644,7 @@ function Popups({
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${huyenTurbo ? 'bg-amber2 text-white shadow-lift' : 'bg-paper text-slate-400'}`}>⚡</div>
                 <div className="min-w-0 mr-auto">
                   <p className="font-display text-[13.5px] font-extrabold text-ink">Huyền Turbo</p>
-                  <p className="text-[10.5px] text-slate-500 mt-0.5">{!turboPolicy.allowed ? 'TẮT bởi BGĐ · kiểm soát credit' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · BGĐ đã khóa trạng thái` : (huyenTurbo ? 'BẬT · Kie.ai · Turbo 3.7 Flash · suy luận cao' : 'TẮT · chế độ thường + API dự phòng')}</p>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">{!turboPolicy.allowed ? 'TẮT bởi BGĐ · kiểm soát credit' : turboPolicy.locked ? `${huyenTurbo ? 'BẬT' : 'TẮT'} · BGĐ đã khóa trạng thái` : (huyenTurbo ? 'BẬT · suy luận chuyên sâu' : 'TẮT · Chế độ thường')}</p>
                 </div>
                 <button onClick={toggleHuyenTurbo} disabled={!turboPolicy.allowed || turboPolicy.locked} className={`relative w-[58px] h-8 rounded-full transition shrink-0 ${huyenTurbo ? 'bg-amber2' : 'bg-slate-200'} ${(!turboPolicy.allowed || turboPolicy.locked) ? 'opacity-60 cursor-not-allowed' : ''}`} aria-label="Bật hoặc tắt Huyền Turbo">
                   <span className={`absolute top-1 w-6 h-6 bg-white rounded-full shadow transition-all ${huyenTurbo ? 'left-8' : 'left-1'}`}></span>
@@ -4992,7 +5673,8 @@ function Popups({
               <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-center fade-in">
                 <I.Loader width="22" height="22" className="animate-spin text-amber2 mx-auto" />
                 <p className="font-display text-[15px] font-extrabold text-ink mt-3">Thay mặt Chú Triết, Huyền đang gợi ý hướng xử lý...</p>
-                <p className="text-[11.5px] text-slate-500 mt-1">{huyenTurbo ? 'Huyền Turbo đang rà soát timeline, phản hồi, yêu cầu thương mại và Kho kiến thức nội bộ với suy luận cao.' : 'Huyền đang rà soát mốc thời gian, nội dung, phản hồi khách hàng và Kho kiến thức để tìm hướng chốt phù hợp nhất.'}</p>
+                <p className="text-[12px] text-slate-600 mt-2 leading-relaxed font-semibold">{advisorMode === 'deep' ? 'Bạn đã chọn phân tích sâu. Huyền sẽ đọc nhiều nội dung và định hướng hơn nên cần thêm thời gian; bạn có thể thu nhỏ cửa sổ và tiếp tục làm việc nhé!' : 'Bạn đã chọn phân tích nhanh. Huyền đang ưu tiên các điểm quyết định và hướng chốt quan trọng để trả kết quả sớm nhất có thể.'}</p>
+                <p className="text-[10.8px] text-slate-400 mt-2">Bạn có thể bấm <b>Thu nhỏ</b> và tiếp tục thao tác các nội dung khác; Huyền vẫn phân tích và sẽ báo khi hoàn tất.</p>
                 <HuyenAnalysisTicker />
               </div>
             )}
@@ -5004,7 +5686,123 @@ function Popups({
               </div>
             )}
 
-            {directAdvisorResult && !directAdvisorBusy && (
+            {directAdvisorResult && !directAdvisorBusy && directAdvisorResult?._huyenMeta?.analysisMode === 'fast' && (
+              <div className="huyen-result-body fade-in max-h-[70vh] overflow-y-auto pr-1 space-y-4">
+                <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-white border border-blue-200 p-4 sm:p-5">
+                  <div className="flex flex-wrap items-center gap-2 mb-3">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-brand text-white px-3 py-1 text-[10.5px] font-extrabold uppercase tracking-wider">
+                      ⚡ Huyền phân tích nhanh
+                    </span>
+                    {directAdvisorResult.stage && <Badge cls="bg-white text-violet-700 border-violet-200">{huyenDisplayText(directAdvisorResult.stage)}</Badge>}
+                    {directAdvisorResult.priority && <Badge cls={directAdvisorResult.priority === 'Cao' ? 'bg-rose-50 text-rose-700 border-rose-200' : directAdvisorResult.priority === 'Thấp' ? 'bg-slate-50 text-slate-600 border-slate-200' : 'bg-amber-50 text-amber-700 border-amber-200'}>Ưu tiên {huyenDisplayText(directAdvisorResult.priority)}</Badge>}
+                  </div>
+                  <p className="text-[14px] sm:text-[15px] font-bold text-ink leading-[1.75] whitespace-pre-line">
+                    {huyenDisplayText(directAdvisorResult.situationSummary)}
+                  </p>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-3">
+                  {directAdvisorResult.mainBarrier && (
+                    <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4">
+                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber-700 mb-2">01 · Rào cản chính</p>
+                      <p className="text-[13px] text-ink leading-[1.75]">{huyenDisplayText(directAdvisorResult.mainBarrier)}</p>
+                    </div>
+                  )}
+                  {directAdvisorResult.customerMindset && (
+                    <div className="rounded-2xl bg-sky-50 border border-sky-200 p-4">
+                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-2">02 · Tâm thế khách hàng</p>
+                      <p className="text-[13px] text-ink leading-[1.75]">{huyenDisplayText(directAdvisorResult.customerMindset)}</p>
+                    </div>
+                  )}
+                </div>
+
+                {Array.isArray(directAdvisorResult.recommendedActions) && directAdvisorResult.recommendedActions.length > 0 && (
+                  <div className="rounded-2xl bg-white border border-line p-4 sm:p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="w-8 h-8 rounded-xl bg-violet-50 text-violet2 flex items-center justify-center font-extrabold">3</span>
+                      <div>
+                        <p className="text-[13px] font-extrabold text-ink">Việc nên làm ngay</p>
+                        <p className="text-[10.8px] text-slate-400">Theo thứ tự ưu tiên để tiến gần chốt</p>
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      {directAdvisorResult.recommendedActions.slice(0,3).map((a, idx) => (
+                        <div key={idx} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
+                          <div className="flex gap-3">
+                            <span className="w-7 h-7 shrink-0 rounded-full bg-ink text-white flex items-center justify-center text-[11px] font-extrabold">{idx+1}</span>
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-extrabold text-ink leading-[1.6]">{huyenDisplayText(a.action)}</p>
+                              {a.reason && <p className="text-[12px] text-slate-600 mt-1.5 leading-[1.7]"><b>Vì sao:</b> {huyenDisplayText(a.reason)}</p>}
+                              {a.goal && <p className="text-[12px] text-slate-600 mt-1 leading-[1.7]"><b>Cần đạt:</b> {huyenDisplayText(a.goal)}</p>}
+                              {a.suggestedScript && <div className="mt-2.5 rounded-lg bg-white border border-blue-100 px-3 py-2.5 text-[12px] text-brand leading-[1.7]"><b>Có thể nói:</b> “{huyenDisplayText(a.suggestedScript)}”</div>}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid lg:grid-cols-2 gap-3">
+                  {Array.isArray(directAdvisorResult.questionsToAsk) && directAdvisorResult.questionsToAsk.length > 0 && (
+                    <div className="rounded-2xl bg-cyan-50/70 border border-cyan-200 p-4">
+                      <p className="text-[11px] font-extrabold uppercase tracking-wider text-brand mb-3">Câu hỏi khóa cần hỏi</p>
+                      <div className="space-y-2.5">
+                        {directAdvisorResult.questionsToAsk.slice(0,3).map((x,i)=>(
+                          <div key={i} className="flex gap-2.5">
+                            <span className="w-6 h-6 shrink-0 rounded-full bg-white border border-cyan-200 text-brand flex items-center justify-center text-[10.5px] font-extrabold">{i+1}</span>
+                            <p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(x)}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {directAdvisorResult.closingPlan && (
+                    <div className="rounded-2xl bg-emerald-50/80 border border-emerald-200 p-4">
+                      <p className="text-[11px] font-extrabold uppercase tracking-wider text-jade mb-3">Mục tiêu chốt lần tới</p>
+                      {directAdvisorResult.closingPlan.objective && <p className="text-[12.8px] font-bold text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.objective)}</p>}
+                      {directAdvisorResult.closingPlan.minimumCommitment && <div className="mt-2.5 pt-2.5 border-t border-emerald-200/70"><p className="text-[10.5px] font-extrabold uppercase text-emerald-700 mb-1">Cam kết nhỏ nhất</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.minimumCommitment)}</p></div>}
+                      {directAdvisorResult.closingPlan.fallback && <div className="mt-2.5"><p className="text-[10.5px] font-extrabold uppercase text-slate-500 mb-1">Nếu chưa đồng ý</p><p className="text-[12px] text-slate-600 leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.fallback)}</p></div>}
+                    </div>
+                  )}
+                </div>
+
+                {directAdvisorResult.nextConversationPlan && (
+                  <div className="rounded-2xl bg-indigo-50/70 border border-indigo-200 p-4">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 mb-3">Kịch bản trao đổi ngắn</p>
+                    <div className="grid sm:grid-cols-3 gap-3">
+                      {directAdvisorResult.nextConversationPlan.opening && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">MỞ ĐẦU</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.opening)}</p></div>}
+                      {directAdvisorResult.nextConversationPlan.discovery && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">HỎI TRỌNG TÂM</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.discovery)}</p></div>}
+                      {directAdvisorResult.nextConversationPlan.close && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">XIN CAM KẾT</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.close)}</p></div>}
+                    </div>
+                  </div>
+                )}
+
+                {directAdvisorResult.nextFollowUp && (
+                  <div className="rounded-xl bg-white border border-blue-100 px-4 py-3 flex gap-3 items-start">
+                    <span className="text-brand mt-0.5">◷</span>
+                    <div>
+                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand">Theo dõi tiếp</p>
+                      <p className="text-[12.5px] text-ink mt-1 leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextFollowUp)}</p>
+                    </div>
+                  </div>
+                )}
+
+                {directAdvisorResult.finalAdvice && (
+                  <div className="rounded-2xl bg-ink text-white p-4 sm:p-5 shadow-soft">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-[.12em] text-blue-200 mb-2">Kết luận của Huyền</p>
+                    <p className="text-[13.5px] font-semibold leading-[1.8] whitespace-pre-line">{huyenDisplayText(directAdvisorResult.finalAdvice)}</p>
+                  </div>
+                )}
+
+                <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-blue-50 text-brand border border-blue-100 text-[11.5px]">
+                  <I.Refresh width="14" height="14" /> Phân tích nhanh lại dữ liệu mới nhất
+                </button>
+              </div>
+            )}
+
+            {directAdvisorResult && !directAdvisorBusy && directAdvisorResult?._huyenMeta?.analysisMode !== 'fast' && (
               <div className="huyen-result-body space-y-3 fade-in max-h-[70vh] overflow-y-auto pr-1">
                 <div className="rounded-2xl bg-white border border-amber-100 p-4">
                   <div className="flex flex-wrap gap-2 mb-2">
@@ -5024,6 +5822,31 @@ function Popups({
                     </div>
                   )}
                 </div>
+
+                {directAdvisorResult.salesDiagnosis && (
+                  <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-1">Chẩn đoán cơ hội Sales</p>
+                    <p className="text-[12px] text-slate-700 leading-relaxed">{directAdvisorResult.salesDiagnosis}</p>
+                    {directAdvisorResult.customerMindset && <p className="text-[11.8px] text-slate-600 mt-2 leading-relaxed"><b className="text-ink">Tâm thế khách hàng:</b> {directAdvisorResult.customerMindset}</p>}
+                  </div>
+                )}
+
+                {Array.isArray(directAdvisorResult.questionsToAsk) && directAdvisorResult.questionsToAsk.length > 0 && (
+                  <div className="rounded-xl bg-cyan-50/70 border border-cyan-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-2">Câu hỏi nên hỏi để tiến gần chốt</p>
+                    <ul className="space-y-1.5">{directAdvisorResult.questionsToAsk.map((x,i)=><li key={i} className="text-[11.8px] text-slate-700 leading-relaxed">{i+1}. {x}</li>)}</ul>
+                  </div>
+                )}
+
+                {directAdvisorResult.nextConversationPlan && (
+                  <div className="rounded-xl bg-indigo-50/70 border border-indigo-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-violet2 mb-2">Kịch bản lần trao đổi tiếp theo</p>
+                    {directAdvisorResult.nextConversationPlan.opening && <p className="text-[11.8px] text-slate-700 leading-relaxed"><b>Mở đầu:</b> {directAdvisorResult.nextConversationPlan.opening}</p>}
+                    {directAdvisorResult.nextConversationPlan.discovery && <p className="text-[11.8px] text-slate-700 mt-1.5 leading-relaxed"><b>Khai thác:</b> {directAdvisorResult.nextConversationPlan.discovery}</p>}
+                    {directAdvisorResult.nextConversationPlan.valueBridge && <p className="text-[11.8px] text-slate-700 mt-1.5 leading-relaxed"><b>Nối giá trị:</b> {directAdvisorResult.nextConversationPlan.valueBridge}</p>}
+                    {directAdvisorResult.nextConversationPlan.close && <p className="text-[11.8px] text-slate-700 mt-1.5 leading-relaxed"><b>Xin cam kết:</b> {directAdvisorResult.nextConversationPlan.close}</p>}
+                  </div>
+                )}
 
                 {Array.isArray(directAdvisorResult.recommendedActions) && directAdvisorResult.recommendedActions.length > 0 && (
                   <div>
@@ -5095,6 +5918,13 @@ function Popups({
                   )}
                 </div>
 
+                {Array.isArray(directAdvisorResult.whatNotToDo) && directAdvisorResult.whatNotToDo.length > 0 && (
+                  <div className="rounded-xl bg-rose-50/70 border border-rose-100 p-3.5">
+                    <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-crimson mb-2">Không nên làm ở lần tiếp theo</p>
+                    <ul className="space-y-1.5">{directAdvisorResult.whatNotToDo.map((x,i)=><li key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</li>)}</ul>
+                  </div>
+                )}
+
                 {Array.isArray(directAdvisorResult.missingInfo) && directAdvisorResult.missingInfo.length > 0 && (
                   <div className="rounded-xl bg-amber-50 border border-amber-100 p-3.5">
                     <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber2 mb-2">Thông tin cần khai thác thêm</p>
@@ -5151,6 +5981,25 @@ function Popups({
           </div>
         )}
       </Modal>
+
+      {/* Huyền thu nhỏ — không khóa giao diện, request vẫn chạy nền trong cùng trang */}
+      {advisorCustomer && directAdvisorMinimized && (
+        <button onClick={() => setDirectAdvisorMinimized(false)}
+          className={`fixed right-4 sm:right-6 bottom-4 sm:bottom-6 z-[1210] w-[min(360px,calc(100vw-32px))] text-left rounded-2xl border shadow-pop px-4 py-3.5 fade-in ${directAdvisorError ? 'bg-rose-50 border-rose-200' : directAdvisorResult ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-amber-200'}`}>
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${directAdvisorError ? 'bg-rose-100 text-crimson' : directAdvisorResult ? 'bg-emerald-100 text-jade' : 'bg-amber-50 text-amber2'}`}>
+              {directAdvisorBusy ? <I.Loader width="18" height="18" className="animate-spin" /> : directAdvisorResult ? <I.Check2 width="18" height="18" /> : <I.AlertCircle width="18" height="18" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="font-display text-[13px] font-extrabold text-ink truncate">Huyền · {advisorCustomer.name}</p>
+              <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">
+                {directAdvisorBusy ? `${advisorMode === 'deep' ? 'Phân tích sâu' : 'Phân tích nhanh'} · tự nối lại nếu mạng chập chờn` : directAdvisorResult ? 'Huyền đã có gợi ý — bấm để xem kết quả' : 'Phân tích gặp gián đoạn — bấm để xem và thử lại'}
+              </p>
+            </div>
+            <span className="text-[18px] text-slate-400">↗</span>
+          </div>
+        </button>
+      )}
 
       <Modal open={!!quickReportCustomer} z={1080} max="max-w-[96vw] min-h-[88vh]" onClose={() => setQuickReportCustomer(null)}>
         {quickReportCustomer && (
@@ -5284,7 +6133,46 @@ function Popups({
 
                 {advisorError && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-[11.5px] font-semibold text-crimson">{advisorError}</div>}
 
-                {advisorResult && (
+                {advisorResult && advisorResult?._huyenMeta?.analysisMode === 'fast' && (
+                  <div className="huyen-result-body mt-4 fade-in space-y-4">
+                    <div className="rounded-2xl bg-blue-50/70 border border-blue-200 p-4">
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        <span className="rounded-full bg-brand text-white px-3 py-1 text-[10.5px] font-extrabold uppercase tracking-wider">⚡ Phân tích nhanh</span>
+                        {advisorResult.stage && <Badge cls="bg-white text-violet-700 border-violet-200">{huyenDisplayText(advisorResult.stage)}</Badge>}
+                        {advisorResult.priority && <Badge cls="bg-white text-amber-700 border-amber-200">Ưu tiên {huyenDisplayText(advisorResult.priority)}</Badge>}
+                      </div>
+                      <p className="text-[14px] font-bold text-ink leading-[1.75]">{huyenDisplayText(advisorResult.situationSummary)}</p>
+                    </div>
+
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      {advisorResult.mainBarrier && <div className="rounded-xl bg-amber-50 border border-amber-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-amber-700 mb-1.5">Rào cản chính</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(advisorResult.mainBarrier)}</p></div>}
+                      {advisorResult.customerMindset && <div className="rounded-xl bg-sky-50 border border-sky-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-brand mb-1.5">Tâm thế khách hàng</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(advisorResult.customerMindset)}</p></div>}
+                    </div>
+
+                    {Array.isArray(advisorResult.recommendedActions) && advisorResult.recommendedActions.length > 0 && (
+                      <div className="rounded-2xl bg-white border border-line p-4">
+                        <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 mb-3">3 việc nên làm ngay</p>
+                        <div className="space-y-3">
+                          {advisorResult.recommendedActions.slice(0,3).map((a,idx)=>(
+                            <div key={idx} className="flex gap-3 rounded-xl bg-slate-50 border border-slate-200 p-3">
+                              <span className="w-7 h-7 rounded-full bg-ink text-white flex items-center justify-center shrink-0 text-[11px] font-extrabold">{idx+1}</span>
+                              <div><p className="text-[12.8px] font-extrabold text-ink leading-[1.6]">{huyenDisplayText(a.action)}</p>{a.reason && <p className="text-[11.8px] text-slate-600 mt-1 leading-[1.7]"><b>Vì sao:</b> {huyenDisplayText(a.reason)}</p>}{a.suggestedScript && <p className="text-[11.8px] text-brand mt-1.5 leading-[1.7]"><b>Có thể nói:</b> “{huyenDisplayText(a.suggestedScript)}”</p>}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      {Array.isArray(advisorResult.questionsToAsk) && advisorResult.questionsToAsk.length > 0 && <div className="rounded-xl bg-cyan-50 border border-cyan-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-brand mb-2">Câu hỏi khóa</p>{advisorResult.questionsToAsk.slice(0,3).map((x,i)=><p key={i} className="text-[12px] text-ink leading-[1.7] mb-1.5 last:mb-0">{i+1}. {huyenDisplayText(x)}</p>)}</div>}
+                      {advisorResult.closingPlan && <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-jade mb-2">Mục tiêu chốt</p>{advisorResult.closingPlan.objective && <p className="text-[12.5px] font-bold text-ink leading-[1.7]">{huyenDisplayText(advisorResult.closingPlan.objective)}</p>}{advisorResult.closingPlan.minimumCommitment && <p className="text-[12px] text-slate-600 mt-2 leading-[1.7]"><b>Cam kết nhỏ nhất:</b> {huyenDisplayText(advisorResult.closingPlan.minimumCommitment)}</p>}</div>}
+                    </div>
+
+                    {advisorResult.finalAdvice && <div className="rounded-2xl bg-ink text-white p-4"><p className="text-[10.5px] font-extrabold uppercase text-blue-200 mb-1.5">Kết luận của Huyền</p><p className="text-[13px] font-semibold leading-[1.8]">{huyenDisplayText(advisorResult.finalAdvice)}</p></div>}
+                  </div>
+                )}
+
+                {advisorResult && advisorResult?._huyenMeta?.analysisMode !== 'fast' && (
                   <div className="huyen-result-body mt-4 space-y-3 fade-in">
                     <div className="rounded-xl bg-white border border-violet-100 p-3.5">
                       <div className="flex flex-wrap gap-2 mb-2">
@@ -5304,6 +6192,29 @@ function Popups({
                         </div>
                       )}
                     </div>
+
+                    {advisorResult.salesDiagnosis && (
+                      <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-brand mb-1">Chẩn đoán cơ hội Sales</p>
+                        <p className="text-[11.8px] text-slate-700 leading-relaxed">{advisorResult.salesDiagnosis}</p>
+                        {advisorResult.customerMindset && <p className="text-[11.5px] text-slate-600 mt-2 leading-relaxed"><b className="text-ink">Tâm thế khách hàng:</b> {advisorResult.customerMindset}</p>}
+                      </div>
+                    )}
+                    {Array.isArray(advisorResult.questionsToAsk) && advisorResult.questionsToAsk.length > 0 && (
+                      <div className="rounded-xl bg-cyan-50/70 border border-cyan-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-brand mb-2">Câu hỏi nên hỏi để tiến gần chốt</p>
+                        {advisorResult.questionsToAsk.map((x,i)=><p key={i} className="text-[11.5px] text-slate-700 leading-relaxed">{i+1}. {x}</p>)}
+                      </div>
+                    )}
+                    {advisorResult.nextConversationPlan && (
+                      <div className="rounded-xl bg-indigo-50/70 border border-indigo-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-violet2 mb-2">Kịch bản lần trao đổi tiếp theo</p>
+                        {advisorResult.nextConversationPlan.opening && <p className="text-[11.5px] text-slate-700 leading-relaxed"><b>Mở đầu:</b> {advisorResult.nextConversationPlan.opening}</p>}
+                        {advisorResult.nextConversationPlan.discovery && <p className="text-[11.5px] text-slate-700 mt-1 leading-relaxed"><b>Khai thác:</b> {advisorResult.nextConversationPlan.discovery}</p>}
+                        {advisorResult.nextConversationPlan.valueBridge && <p className="text-[11.5px] text-slate-700 mt-1 leading-relaxed"><b>Nối giá trị:</b> {advisorResult.nextConversationPlan.valueBridge}</p>}
+                        {advisorResult.nextConversationPlan.close && <p className="text-[11.5px] text-slate-700 mt-1 leading-relaxed"><b>Xin cam kết:</b> {advisorResult.nextConversationPlan.close}</p>}
+                      </div>
+                    )}
 
                     {Array.isArray(advisorResult.recommendedActions) && advisorResult.recommendedActions.length > 0 && (
                       <div>
@@ -5365,6 +6276,12 @@ function Popups({
                       <div className="rounded-xl bg-rose-50/70 border border-rose-100 p-3.5">
                         <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-crimson mb-2">Rủi ro cần chú ý</p>
                         {advisorResult.risks.map((x,i)=><p key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</p>)}
+                      </div>
+                    )}
+                    {Array.isArray(advisorResult.whatNotToDo) && advisorResult.whatNotToDo.length > 0 && (
+                      <div className="rounded-xl bg-rose-50/70 border border-rose-100 p-3.5">
+                        <p className="text-[10.5px] font-extrabold uppercase tracking-wide text-crimson mb-2">Không nên làm ở lần tiếp theo</p>
+                        {advisorResult.whatNotToDo.map((x,i)=><p key={i} className="text-[11.5px] text-slate-600 leading-relaxed">• {x}</p>)}
                       </div>
                     )}
                     {Array.isArray(advisorResult.missingInfo) && advisorResult.missingInfo.length > 0 && (
