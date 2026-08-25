@@ -474,24 +474,47 @@ const isKeyCooling = (key) => (GEMINI_KEY_COOLDOWN.get(key) || 0) > Date.now();
 */
 const HUYEN_AI_PROVIDERS = {
   GEMINI: 'gemini',
-  DEEPSEEK_V4_FLASH: 'deepseek-v4-flash'
+  DEEPSEEK_V4_FLASH: 'deepseek-v4-flash',
+  TENCENT_HY3: 'hy3'
 };
 const BAI_BASE_URL = 'https://api.b.ai/v1';
 const BAI_ENDPOINT = `${BAI_BASE_URL}/chat/completions`;
-const BAI_MODEL_ID = 'deepseek-v4-flash';
-/* Key B.AI do BGĐ cung cấp. Có thể thay trong Cài đặt và lưu Firebase. */
-const BAI_DEFAULT_API_KEY = 'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1';
-/* Tự thay key mặc định cũ đã từng lưu trên Firebase bằng key mới ở bản này. */
-const BAI_LEGACY_DEFAULT_KEYS = new Set(['sk-i2zxo8byhg6uetizhlz4x6ikq80f5bgs']);
+const BAI_MODEL_IDS = {
+  [HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH]: 'deepseek-v4-flash',
+  [HUYEN_AI_PROVIDERS.TENCENT_HY3]: 'hy3'
+};
+/* Alias tương thích mã cũ. */
+const BAI_MODEL_ID = BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH];
+/* V10.4: không nhúng API key B.AI vào mã nguồn. Nhập key hợp lệ trong Cài đặt và lưu Firebase. */
+const BAI_DEFAULT_API_KEY = '';
+/* Các key mặc định cũ đã bị thay thế/hết hạn: tuyệt đối không tự dùng lại để tránh 401 lặp. */
+const BAI_REVOKED_API_KEYS = new Set([
+  'sk-i2zxo8byhg6uetizhlz4x6ikq80f5bgs',
+  'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1'
+]);
 let BAI_API_KEY = BAI_DEFAULT_API_KEY;
 let HUYEN_PRIMARY_AI_PROVIDER = HUYEN_AI_PROVIDERS.GEMINI;
 
-const normalizeHuyenAiProvider = (v) => v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
-  ? HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH : HUYEN_AI_PROVIDERS.GEMINI;
+const normalizeHuyenAiProvider = (v) => {
+  if (v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH;
+  if (v === HUYEN_AI_PROVIDERS.TENCENT_HY3) return HUYEN_AI_PROVIDERS.TENCENT_HY3;
+  return HUYEN_AI_PROVIDERS.GEMINI;
+};
+const isBaiProvider = (v) => {
+  const p = normalizeHuyenAiProvider(v);
+  return p === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH || p === HUYEN_AI_PROVIDERS.TENCENT_HY3;
+};
+const getBaiModelId = (provider = HUYEN_PRIMARY_AI_PROVIDER) => BAI_MODEL_IDS[normalizeHuyenAiProvider(provider)] || BAI_MODEL_ID;
+const huyenAiProviderLabel = (provider) => {
+  const p = normalizeHuyenAiProvider(provider);
+  if (p === HUYEN_AI_PROVIDERS.TENCENT_HY3) return 'Tencent Hy3 · B.AI';
+  if (p === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return 'DeepSeek V4 Flash · B.AI';
+  return 'Gemini 3.7 Flash · Kie.ai';
+};
 const setHuyenPrimaryAiProvider = (v) => { HUYEN_PRIMARY_AI_PROVIDER = normalizeHuyenAiProvider(v); };
 const resolveBaiApiKey = (savedKey) => {
   const key = String(savedKey || '').trim();
-  return (!key || BAI_LEGACY_DEFAULT_KEYS.has(key)) ? BAI_DEFAULT_API_KEY : key;
+  return (!key || BAI_REVOKED_API_KEYS.has(key)) ? BAI_DEFAULT_API_KEY : key;
 };
 const setBaiApiKey = (v) => { BAI_API_KEY = resolveBaiApiKey(v); };
 const maskBaiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
@@ -512,10 +535,10 @@ function baiFriendlyError(err) {
       ? 'Trình duyệt không gọi được api.b.ai từ file:// (khả năng CORS/mạng). Hãy chạy ứng dụng qua http/https hoặc dùng B.AI Bridge/backend.'
       : 'Trình duyệt không kết nối được api.b.ai (khả năng CORS, DNS, tường lửa hoặc mạng chặn).';
   }
-  if (/BAI_HTTP_401/i.test(raw)) return 'API key B.AI không hợp lệ hoặc đã bị thu hồi (HTTP 401).';
+  if (/BAI_HTTP_401/i.test(raw)) return 'API key B.AI đã hết hạn hoặc không còn hợp lệ (HTTP 401). Đây không phải lỗi model Hy3/DeepSeek. Hãy tạo hoặc lấy API key B.AI mới rồi dán vào Cài đặt → Lưu model + API key.';
   if (/BAI_HTTP_403/i.test(raw)) return 'B.AI từ chối quyền truy cập/model hoặc tài khoản chưa đủ điều kiện (HTTP 403).';
   if (/BAI_HTTP_429/i.test(raw)) return 'B.AI đang giới hạn tần suất (HTTP 429). Thử lại sau.';
-  if (/BAI_MODEL_NOT_AVAILABLE/i.test(raw)) return 'Key kết nối được B.AI nhưng tài khoản hiện không thấy model deepseek-v4-flash trong /v1/models.';
+  if (/BAI_MODEL_NOT_AVAILABLE/i.test(raw)) return 'Key kết nối được B.AI nhưng tài khoản hiện không thấy model đang chọn trong /v1/models.';
   if (/BAI_EMPTY_LENGTH/i.test(raw)) return 'B.AI đã nhận request nhưng giới hạn max_tokens quá thấp nên chưa kịp tạo câu trả lời. Bản này sẽ tự thử lại với ngân sách token lớn hơn.';
   if (/BAI_EMPTY/i.test(raw)) return 'B.AI trả HTTP 200 nhưng phần nội dung trả lời đang rỗng. Bản này đã hỗ trợ cả JSON non-stream và SSE stream; hãy bấm Kiểm tra B.AI lại.';
   if (/AbortError|BAI_TIMEOUT/i.test(raw)) return 'B.AI phản hồi quá lâu và đã hết thời gian chờ.';
@@ -693,7 +716,7 @@ function parseBaiRawResponse(raw, { allowReasoning = false } = {}) {
   }
 }
 
-async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
+async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
   const key = String(apiKey || BAI_API_KEY || '').trim();
   if (!key) throw new Error('NO_BAI_KEY');
 
@@ -702,7 +725,7 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
   const minTokens = json ? 1024 : 256;
   const effectiveMaxTokens = Math.max(Number(maxTokens) || 0, minTokens);
   const baseBody = {
-    model: BAI_MODEL_ID,
+    model: modelId,
     messages: [{ role: 'user', content: String(prompt || '') }],
     temperature,
     max_tokens: effectiveMaxTokens
@@ -722,8 +745,11 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
           let detail = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 900);
           lastErr = new Error(`BAI_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
           lastErr.status = res.status;
-          /* Sai auth Bearer có thể thử x-api-key. */
-          if ((res.status === 401 || res.status === 403) && authMode === 'bearer') break;
+          /* 401 = credential không hợp lệ/hết hạn. Bearer và x-api-key dùng cùng secret,
+             nên KHÔNG gọi lặp transport/auth khác. Dừng ngay để tránh 3-4 request 401 liên tiếp. */
+          if (res.status === 401) throw lastErr;
+          /* 403 có thể là quyền model/tài khoản; cũng không đổi transport vô ích. */
+          if (res.status === 403) throw lastErr;
           /* Nếu stream bị gateway từ chối, thử transport còn lại ngay. */
           if (streamMode && [400,404,405,406,415,422,500,502,503].includes(res.status)) continue;
           throw lastErr;
@@ -734,7 +760,7 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
         if (answer) {
           try {
             window.__IDECO_HUYEN_PRIMARY_AI_LAST__ = {
-              provider: 'B.AI', model: BAI_MODEL_ID, at: Date.now(), key: maskBaiKey(key), authMode,
+              provider: 'B.AI', model: modelId, at: Date.now(), key: maskBaiKey(key), authMode,
               stream: parsed.isStream, finishReason: parsed.finishReason || ''
             };
           } catch (_) {}
@@ -745,7 +771,7 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
         try {
           const rawPreview = String(raw || '').replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-••••').slice(0, 1200);
           console.warn('[B.AI EMPTY RESPONSE]', {
-            model: BAI_MODEL_ID, authMode, stream: streamMode,
+            model: modelId, authMode, stream: streamMode,
             contentType: res.headers.get('content-type') || '',
             finishReason: parsed.finishReason || '', rawPreview
           });
@@ -755,21 +781,31 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
         if (streamMode) continue;
       } catch (e) {
         lastErr = e;
-        if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT/.test(String(e?.message || e))) throw e;
-        /* Cho phép thử transport/auth tiếp theo với lỗi nội dung hoặc gateway. */
+        const em = String(e?.message || e);
+        if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT|BAI_HTTP_401|BAI_HTTP_403/.test(em)) throw e;
+        /* Chỉ thử transport/auth tiếp theo với lỗi nội dung hoặc gateway tạm thời. */
       }
     }
   }
   throw lastErr || new Error('BAI_FAIL');
 }
 
-async function diagnoseBaiConnection(apiKey = null) {
+async function callDeepSeekBai(prompt, opts = {}) {
+  return callBaiModel(prompt, { ...opts, modelId: BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH] });
+}
+async function callHy3Bai(prompt, opts = {}) {
+  return callBaiModel(prompt, { ...opts, modelId: BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.TENCENT_HY3] });
+}
+
+async function diagnoseBaiConnection(apiKey = null, provider = HUYEN_PRIMARY_AI_PROVIDER) {
   const key = String(apiKey || BAI_API_KEY || '').trim();
+  const modelId = getBaiModelId(provider);
   if (!key) throw new Error('NO_BAI_KEY');
 
   /* Kiểm tra đúng đường gọi thực tế trước: POST /chat/completions.
      GET /models chỉ là kiểm tra bổ sung, không được làm nút test báo lỗi giả khi chat endpoint vẫn chạy. */
-  const text = await callDeepSeekBai('Trả lời ngắn gọn đúng một từ: OK', {
+  const text = await callBaiModel('Trả lời ngắn gọn đúng một từ: OK', {
+    modelId,
     json: false, temperature: 0, maxTokens: 2048, apiKey: key
   });
   const last = (typeof window !== 'undefined' && window.__IDECO_HUYEN_PRIMARY_AI_LAST__) || {};
@@ -778,8 +814,8 @@ async function diagnoseBaiConnection(apiKey = null) {
   let modelsCheckSkipped = false;
   try {
     modelInfo = await baiListModels(key);
-    if (modelInfo.ids.length && !modelInfo.ids.includes(BAI_MODEL_ID)) {
-      const e = new Error(`BAI_MODEL_NOT_AVAILABLE — ${BAI_MODEL_ID}`);
+    if (modelInfo.ids.length && !modelInfo.ids.includes(modelId)) {
+      const e = new Error(`BAI_MODEL_NOT_AVAILABLE — ${modelId}`);
       e.availableModels = modelInfo.ids.slice(0, 30);
       throw e;
     }
@@ -800,20 +836,35 @@ async function diagnoseBaiConnection(apiKey = null) {
 */
 async function callHuyenPrimaryAI(prompt, { json = true, temperature = 0.10, maxTokens = 4200, timeoutMs = 42000, fallbackTimeoutMs = 55000 } = {}) {
   const provider = normalizeHuyenAiProvider(HUYEN_PRIMARY_AI_PROVIDER);
-  if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) {
+  if (isBaiProvider(provider)) {
+    const primaryModelId = getBaiModelId(provider);
+    const alternateProvider = provider === HUYEN_AI_PROVIDERS.TENCENT_HY3
+      ? HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
+      : HUYEN_AI_PROVIDERS.TENCENT_HY3;
+    const alternateModelId = getBaiModelId(alternateProvider);
     try {
-      return await callDeepSeekBai(prompt, { json, temperature, maxTokens, timeoutMs });
-    } catch (deepseekErr) {
-      console.warn('[HUYEN] DeepSeek V4 Flash/B.AI lỗi, tự chuyển Gemini 3.7 Flash/Kie.ai:', deepseekErr);
+      return await callBaiModel(prompt, { modelId: primaryModelId, json, temperature, maxTokens, timeoutMs });
+    } catch (primaryErr) {
+      console.warn(`[HUYEN] ${huyenAiProviderLabel(provider)} lỗi, thử ${huyenAiProviderLabel(alternateProvider)} bằng cùng B.AI key:`, primaryErr);
       try {
-        window.__IDECO_HUYEN_BAI_FALLBACK__ = { at: Date.now(), reason: String(deepseekErr?.message || deepseekErr) };
+        window.__IDECO_HUYEN_BAI_FALLBACK__ = { at: Date.now(), from: primaryModelId, to: alternateModelId, reason: String(primaryErr?.message || primaryErr) };
       } catch (_) {}
+      const msg = String(primaryErr?.message || primaryErr || '');
+      if (!/401|403|invalid.?key|permission|denied/i.test(msg)) {
+        try {
+          return await callBaiModel(prompt, {
+            modelId: alternateModelId, json, temperature, maxTokens,
+            timeoutMs: Math.min(Math.max(12000, timeoutMs), 26000)
+          });
+        } catch (alternateErr) {
+          console.warn(`[HUYEN] ${huyenAiProviderLabel(alternateProvider)} cũng lỗi, chuyển Gemini 3.7 Flash/Kie.ai:`, alternateErr);
+        }
+      }
       return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
     }
   }
   return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
 }
-
 
 /* V9.8 — chống đứt giữa chừng: chỉ tự nối lại 1 lần với lỗi tạm thời.
    Không retry lỗi key/quyền 401/403 để tránh tốn credit vô ích. */
@@ -2109,7 +2160,7 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
-  /* AI chính của Huyền: Gemini 3.7 Flash/Kie.ai hoặc DeepSeek V4 Flash/B.AI */
+  /* AI chính của Huyền: Gemini 3.7 Flash/Kie.ai, DeepSeek V4 Flash/B.AI hoặc Tencent Hy3/B.AI */
   const [huyenPrimaryAi, setHuyenPrimaryAi] = useState(HUYEN_AI_PROVIDERS.GEMINI);
   const [baiApiKey, setBaiApiKeyState] = useState(BAI_DEFAULT_API_KEY);
   /* BGĐ kiểm soát quyền dùng Huyền Turbo / credit qua Firebase */
@@ -2279,12 +2330,10 @@ function App() {
       setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
       setBaiApiKeyState(key); setBaiApiKey(key);
 
-      /* Nếu Firebase còn đúng key mặc định cũ của bản trước thì nâng sang key mới một lần.
-         Key do quản trị tự nhập khác key cũ sẽ được giữ nguyên, không bị ghi đè. */
-      if (v && savedKey && BAI_LEGACY_DEFAULT_KEYS.has(savedKey)) {
-        dbSet('settings/huyenAiConfig', {
-          ...v, baiApiKey: BAI_DEFAULT_API_KEY, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now()
-        }).catch(() => {});
+      /* Nếu Firebase còn key cũ/hết hạn đã biết, không dùng lại. Không tự ghi đè Firebase:
+         quản trị cần nhập key mới rồi bấm Lưu để cập nhật cho toàn bộ thiết bị. */
+      if (v && savedKey && BAI_REVOKED_API_KEYS.has(savedKey)) {
+        console.warn('[B.AI] Phát hiện API key cũ/hết hạn trong Firebase — đã vô hiệu hóa tại máy này. Hãy nhập key mới trong Cài đặt.');
       }
     });
     const offTurboControl = dbOnValue('settings/huyenTurboControl', (v) => {
@@ -2746,30 +2795,39 @@ function App() {
     if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
     const provider = normalizeHuyenAiProvider(document.getElementById('huyenPrimaryAiInput')?.value || HUYEN_AI_PROVIDERS.GEMINI);
     const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
-    if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH && !key) {
-      notify('Bạn chưa nhập API key B.AI cho DeepSeek V4 Flash.', 'error', 4500); return;
+    if (isBaiProvider(provider) && !key) {
+      notify('Bạn chưa nhập API key B.AI cho model đã chọn.', 'error', 4500); return;
     }
     if (key && !/^sk-[A-Za-z0-9_-]{12,}$/.test(key)) {
       notify('API key B.AI chưa đúng định dạng thông thường sk-…', 'error', 4500); return;
     }
-    const payload = { provider, baiApiKey: key, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
+    if (BAI_REVOKED_API_KEYS.has(key)) {
+      notify('API key B.AI này đã được xác định là hết hạn/không hợp lệ. Hãy nhập key B.AI mới trước khi lưu.', 'error', 7000); return;
+    }
+    const payload = { provider, baiApiKey: key, model: getBaiModelId(provider), baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
     const ok = await dbSet('settings/huyenAiConfig', payload);
     if (!ok) { notify('Không lưu được lựa chọn AI Huyền lên Firebase.', 'error'); return; }
     setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
     setBaiApiKeyState(key); setBaiApiKey(key);
-    notify(provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
-      ? 'Đã chọn DeepSeek V4 Flash/B.AI làm AI chính cho Huyền. Nếu B.AI lỗi, Huyền tự chuyển Gemini 3.7 Flash/Kie.ai.'
-      : 'Đã chọn Gemini 3.7 Flash/Kie.ai làm AI chính cho Huyền.', 'success', 5200);
+    notify(isBaiProvider(provider)
+      ? `Đã chọn ${huyenAiProviderLabel(provider)} làm AI chính. Nếu model này lỗi, Huyền thử model B.AI còn lại bằng cùng API key rồi mới chuyển Gemini 3.7 Flash/Kie.ai.`
+      : 'Đã chọn Gemini 3.7 Flash/Kie.ai làm AI chính cho Huyền.', 'success', 6200);
   };
 
   const handleTestBai = async () => {
     if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
     const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
-    if (!key) { notify('Nhập API key B.AI trước khi kiểm tra.', 'error'); return; }
-    notify('Đang kiểm tra B.AI → deepseek-v4-flash → chat/completions…', 'info', 3200);
+    if (!key) { notify('Nhập API key B.AI mới trước khi kiểm tra.', 'error'); return; }
+    if (BAI_REVOKED_API_KEYS.has(key)) {
+      notify('Key B.AI này đã trả HTTP 401 (hết hạn/không hợp lệ). Hãy tạo/lấy key mới trên B.AI rồi dán vào đây.', 'error', 8000); return;
+    }
+    const provider = normalizeHuyenAiProvider(document.getElementById('huyenPrimaryAiInput')?.value || HUYEN_PRIMARY_AI_PROVIDER);
+    if (!isBaiProvider(provider)) { notify('Hãy chọn DeepSeek V4 Flash hoặc Tencent Hy3 trước khi kiểm tra B.AI.', 'warning', 4500); return; }
+    const modelId = getBaiModelId(provider);
+    notify(`Đang kiểm tra ${huyenAiProviderLabel(provider)} → ${modelId} → chat/completions…`, 'info', 3200);
     try {
-      const r = await diagnoseBaiConnection(key);
-      notify(`B.AI kết nối thành công · ${BAI_MODEL_ID} · ${BAI_BASE_URL} · xác thực ${r.authMode === 'x-api-key' ? 'x-api-key' : 'Bearer'} · phản hồi OK`, 'success', 6500);
+      const r = await diagnoseBaiConnection(key, provider);
+      notify(`B.AI kết nối thành công · ${modelId} · ${BAI_BASE_URL} · xác thực ${r.authMode === 'x-api-key' ? 'x-api-key' : 'Bearer'} · phản hồi OK`, 'success', 6500);
     } catch (e) {
       console.error('[B.AI TEST]', e);
       notify(`B.AI chưa kết nối được: ${baiFriendlyError(e)}`, 'error', 10000);
@@ -4896,26 +4954,27 @@ function App() {
                     <div className="w-10 h-10 rounded-xl bg-sky-50 text-brand flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
                     <div>
                       <h3 className="font-display text-[17px] font-extrabold text-ink">AI chính cho Huyền</h3>
-                      <p className="text-[11px] text-slate-400 font-semibold">Gemini 3.7 Flash · Kie.ai hoặc DeepSeek V4 Flash · B.AI</p>
+                      <p className="text-[11px] text-slate-400 font-semibold">Gemini 3.7 Flash · Kie.ai · DeepSeek V4 Flash · B.AI · Tencent Hy3 · B.AI</p>
                     </div>
                   </div>
                   <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
-                    Chọn model dùng cho Huyền. Nếu chọn DeepSeek V4 Flash mà B.AI lỗi/timeout/quyền truy cập, hệ thống tự chuyển ngay sang Gemini 3.7 Flash qua Kie.ai để không gián đoạn công việc.
+                    Chọn model dùng cho Huyền. DeepSeek V4 Flash và Tencent Hy3 dùng chung API key B.AI. Nếu model B.AI đang chọn lỗi, hệ thống thử model B.AI còn lại bằng cùng key rồi mới chuyển Gemini 3.7 Flash/Kie.ai.
                   </p>
                   <div className="space-y-4">
                     <Field label="MODEL AI CHÍNH">
                       <select id="huyenPrimaryAiInput" className="fld" defaultValue={huyenPrimaryAi} key={`ai-${huyenPrimaryAi}`}>
                         <option value={HUYEN_AI_PROVIDERS.GEMINI}>Gemini 3.7 Flash · Kie.ai</option>
                         <option value={HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH}>DeepSeek V4 Flash · B.AI</option>
+                        <option value={HUYEN_AI_PROVIDERS.TENCENT_HY3}>Tencent Hy3 · B.AI</option>
                       </select>
                     </Field>
-                    <Field label="API KEY B.AI — DEEPSEEK V4 FLASH">
+                    <Field label="API KEY B.AI — DÙNG CHUNG DEEPSEEK V4 FLASH / TENCENT HY3">
                       <input id="baiApiKeyInput" type="password" defaultValue={baiApiKey || ''} key={`bai-${baiApiKey}`} placeholder="sk-..." className="fld font-mono text-[13px]" autoComplete="off" />
                     </Field>
                     <div className="rounded-xl bg-sky-50 border border-sky-200 px-3.5 py-3 text-[11.5px] text-sky-900 leading-relaxed">
-                      <b>Model ID:</b> <span className="font-mono">deepseek-v4-flash</span> · <b>Base URL:</b> <span className="font-mono">https://api.b.ai/v1</span><br/>
+                      <b>Model ID:</b> <span className="font-mono">deepseek-v4-flash</span> / <span className="font-mono">hy3</span> · <b>Base URL:</b> <span className="font-mono">https://api.b.ai/v1</span> · <b>401:</b> key hết hạn/không hợp lệ, cần nhập key mới; không phải lỗi model.<br/>
                       <b>Chat endpoint:</b> <span className="font-mono">https://api.b.ai/v1/chat/completions</span> · xác thực <b>Authorization: Bearer</b>.<br/>
-                      Kết nối ưu tiên <b>stream SSE</b> theo mẫu curl, tự gom <span className="font-mono">choices[].delta.content</span> và tự thử non-stream khi cần. DeepSeek V4 Flash là <b>text-only</b>.
+                      Kết nối OpenAI-compatible, tự đọc cả non-stream và stream SSE. <b>Tencent Hy3</b> hỗ trợ suy luận nhanh/sâu và context dài; cả Hy3 lẫn DeepSeek V4 Flash đều là <b>text-only</b>.
                     </div>
                     {typeof location !== 'undefined' && location.protocol === 'file:' && (
                       <div className="rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-3 text-[11.5px] text-amber-900 leading-relaxed">
@@ -4931,7 +4990,7 @@ function App() {
                       </button>
                     </div>
                     <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                      Đang chọn: <b>{huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : 'Gemini 3.7 Flash · Kie.ai'}</b>
+                      Đang chọn: <b>{huyenAiProviderLabel(huyenPrimaryAi)}</b>
                       {baiApiKey ? ` · B.AI key ${maskBaiKey(baiApiKey)}` : ''}.
                     </p>
                   </div>
