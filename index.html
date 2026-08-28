@@ -175,7 +175,7 @@ tailwind.config = {
 
 <script type="text/jsx-source" id="app-source">
 /* ============================================================================
-   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN + B.AI DEEPSEEK V4 FLASH NEW KEY
+   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN V10.9 GEMINI INTERACTIONS FIX
    ============================================================================ */
 
 /* ####################################################################
@@ -468,53 +468,63 @@ const geminiKeys = () => geminiKeyEntries().map(x => x.key);
 const maskGeminiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
 const isKeyCooling = (key) => (GEMINI_KEY_COOLDOWN.get(key) || 0) > Date.now();
 
+/* Gemini AI Studio: model do BGĐ chọn. Chỉ thay khối AI, không ảnh hưởng giao diện/luồng khác. */
+const GEMINI_STUDIO_MODEL_OPTIONS = [
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite'
+];
+let GEMINI_STUDIO_MODEL = 'gemini-3.7-flash';
+const normalizeGeminiStudioModel = (v) => {
+  const x = String(v || '').trim().replace(/^models\//, '');
+  return /^[A-Za-z0-9._:-]+$/.test(x) ? x : 'gemini-3.7-flash';
+};
+const setGeminiStudioModel = (v) => { GEMINI_STUDIO_MODEL = normalizeGeminiStudioModel(v); };
+const isFileProtocol = () => (typeof location !== 'undefined' && location.protocol === 'file:');
+
+/* Cache an toàn: cùng hồ sơ + cùng chế độ + cùng ngày -> không gọi AI lại. */
+const HUYEN_ANALYSIS_CACHE = new Map();
+function huyenAnalysisFingerprint(customer, mode) {
+  const payload = JSON.stringify({
+    id: customer?.id || '', updatedAt: customer?.updatedAt || '', status: customer?.status || '',
+    report: customer?.report || '', feedback: customer?.customerFeedback || '',
+    appointments: customer?.appointments || [], mode: mode || 'fast',
+    date: (typeof getLocalDateString === 'function' ? getLocalDateString(new Date()) : new Date().toISOString().slice(0,10)),
+    studioModel: GEMINI_STUDIO_MODEL, primary: HUYEN_PRIMARY_AI_PROVIDER || ''
+  });
+  let h = 2166136261;
+  for (let i = 0; i < payload.length; i++) { h ^= payload.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
 
 /* ---------------- AI CHÍNH CHO HUYỀN — Gemini hoặc DeepSeek V4 Flash qua B.AI ----------------
    Lưu ý: đây là ứng dụng HTML phía trình duyệt. API key nằm ở client/Firebase có thể bị người dùng kỹ thuật xem thấy.
 */
 const HUYEN_AI_PROVIDERS = {
   GEMINI: 'gemini',
-  DEEPSEEK_V4_FLASH: 'deepseek-v4-flash',
-  TENCENT_HY3: 'hy3'
+  DEEPSEEK_V4_FLASH: 'deepseek-v4-flash'
 };
 const BAI_BASE_URL = 'https://api.b.ai/v1';
 const BAI_ENDPOINT = `${BAI_BASE_URL}/chat/completions`;
-const BAI_MODEL_IDS = {
-  [HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH]: 'deepseek-v4-flash',
-  [HUYEN_AI_PROVIDERS.TENCENT_HY3]: 'hy3'
-};
-/* Alias tương thích mã cũ. */
-const BAI_MODEL_ID = BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH];
-/* V10.4: không nhúng API key B.AI vào mã nguồn. Nhập key hợp lệ trong Cài đặt và lưu Firebase. */
-const BAI_DEFAULT_API_KEY = '';
-/* Các key mặc định cũ đã bị thay thế/hết hạn: tuyệt đối không tự dùng lại để tránh 401 lặp. */
-const BAI_REVOKED_API_KEYS = new Set([
-  'sk-i2zxo8byhg6uetizhlz4x6ikq80f5bgs',
-  'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1'
-]);
+const BAI_MODEL_ID = 'deepseek-v4-flash';
+/* Key B.AI do BGĐ cung cấp. Có thể thay trong Cài đặt và lưu Firebase. */
+const BAI_DEFAULT_API_KEY = 'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1';
+/* Tự thay key mặc định cũ đã từng lưu trên Firebase bằng key mới ở bản này. */
+const BAI_LEGACY_DEFAULT_KEYS = new Set(['sk-i2zxo8byhg6uetizhlz4x6ikq80f5bgs']);
 let BAI_API_KEY = BAI_DEFAULT_API_KEY;
 let HUYEN_PRIMARY_AI_PROVIDER = HUYEN_AI_PROVIDERS.GEMINI;
 
-const normalizeHuyenAiProvider = (v) => {
-  if (v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH;
-  if (v === HUYEN_AI_PROVIDERS.TENCENT_HY3) return HUYEN_AI_PROVIDERS.TENCENT_HY3;
-  return HUYEN_AI_PROVIDERS.GEMINI;
-};
-const isBaiProvider = (v) => {
-  const p = normalizeHuyenAiProvider(v);
-  return p === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH || p === HUYEN_AI_PROVIDERS.TENCENT_HY3;
-};
-const getBaiModelId = (provider = HUYEN_PRIMARY_AI_PROVIDER) => BAI_MODEL_IDS[normalizeHuyenAiProvider(provider)] || BAI_MODEL_ID;
-const huyenAiProviderLabel = (provider) => {
-  const p = normalizeHuyenAiProvider(provider);
-  if (p === HUYEN_AI_PROVIDERS.TENCENT_HY3) return 'Tencent Hy3 · B.AI';
-  if (p === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return 'DeepSeek V4 Flash · B.AI';
-  return 'Gemini 3.7 Flash · Kie.ai';
-};
+const normalizeHuyenAiProvider = (v) => v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
+  ? HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH : HUYEN_AI_PROVIDERS.GEMINI;
 const setHuyenPrimaryAiProvider = (v) => { HUYEN_PRIMARY_AI_PROVIDER = normalizeHuyenAiProvider(v); };
 const resolveBaiApiKey = (savedKey) => {
   const key = String(savedKey || '').trim();
-  return (!key || BAI_REVOKED_API_KEYS.has(key)) ? BAI_DEFAULT_API_KEY : key;
+  return (!key || BAI_LEGACY_DEFAULT_KEYS.has(key)) ? BAI_DEFAULT_API_KEY : key;
 };
 const setBaiApiKey = (v) => { BAI_API_KEY = resolveBaiApiKey(v); };
 const maskBaiKey = (k) => k ? `${k.slice(0,4)}••••${k.slice(-4)}` : '';
@@ -535,10 +545,10 @@ function baiFriendlyError(err) {
       ? 'Trình duyệt không gọi được api.b.ai từ file:// (khả năng CORS/mạng). Hãy chạy ứng dụng qua http/https hoặc dùng B.AI Bridge/backend.'
       : 'Trình duyệt không kết nối được api.b.ai (khả năng CORS, DNS, tường lửa hoặc mạng chặn).';
   }
-  if (/BAI_HTTP_401/i.test(raw)) return 'API key B.AI đã hết hạn hoặc không còn hợp lệ (HTTP 401). Đây không phải lỗi model Hy3/DeepSeek. Hãy tạo hoặc lấy API key B.AI mới rồi dán vào Cài đặt → Lưu model + API key.';
+  if (/BAI_HTTP_401/i.test(raw)) return 'API key B.AI không hợp lệ hoặc đã bị thu hồi (HTTP 401).';
   if (/BAI_HTTP_403/i.test(raw)) return 'B.AI từ chối quyền truy cập/model hoặc tài khoản chưa đủ điều kiện (HTTP 403).';
   if (/BAI_HTTP_429/i.test(raw)) return 'B.AI đang giới hạn tần suất (HTTP 429). Thử lại sau.';
-  if (/BAI_MODEL_NOT_AVAILABLE/i.test(raw)) return 'Key kết nối được B.AI nhưng tài khoản hiện không thấy model đang chọn trong /v1/models.';
+  if (/BAI_MODEL_NOT_AVAILABLE/i.test(raw)) return 'Key kết nối được B.AI nhưng tài khoản hiện không thấy model deepseek-v4-flash trong /v1/models.';
   if (/BAI_EMPTY_LENGTH/i.test(raw)) return 'B.AI đã nhận request nhưng giới hạn max_tokens quá thấp nên chưa kịp tạo câu trả lời. Bản này sẽ tự thử lại với ngân sách token lớn hơn.';
   if (/BAI_EMPTY/i.test(raw)) return 'B.AI trả HTTP 200 nhưng phần nội dung trả lời đang rỗng. Bản này đã hỗ trợ cả JSON non-stream và SSE stream; hãy bấm Kiểm tra B.AI lại.';
   if (/AbortError|BAI_TIMEOUT/i.test(raw)) return 'B.AI phản hồi quá lâu và đã hết thời gian chờ.';
@@ -557,42 +567,6 @@ async function baiFetch(url, { method = 'GET', key, body = null, authMode = 'bea
       mode: 'cors',
       cache: 'no-store'
     });
-  } catch (e) {
-    if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
-    const msg = String(e?.message || e);
-    if (e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
-      const x = new Error(`BAI_BROWSER_FETCH_FAILED — ${msg}`);
-      x.cause = e;
-      throw x;
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-
-/* fetch + đọc TOÀN BỘ body trong cùng timeout.
-   Bản cũ chỉ timeout tới lúc nhận header; với stream, res.text() có thể chờ rất lâu mà timer đã bị clear. */
-async function baiFetchText(url, { method = 'GET', key, body = null, authMode = 'bearer', timeoutMs = 45000 } = {}) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), Math.max(3000, Number(timeoutMs) || 45000));
-  try {
-    const res = await fetch(url, {
-      method,
-      headers: baiAuthHeaders(key, authMode, body !== null),
-      ...(body !== null ? { body: JSON.stringify(body) } : {}),
-      signal: ctl.signal,
-      mode: 'cors',
-      cache: 'no-store'
-    });
-    let raw = '';
-    try { raw = await res.text(); }
-    catch (e) {
-      if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
-      throw e;
-    }
-    return { res, raw };
   } catch (e) {
     if (e?.name === 'AbortError') throw new Error('BAI_TIMEOUT');
     const msg = String(e?.message || e);
@@ -677,9 +651,7 @@ function extractBaiPayloadText(data, { allowReasoning = false } = {}) {
     }
     if (!out) out += baiTextPart(data?.reasoning_content);
   }
-  /* GIỮ NGUYÊN khoảng trắng đầu/cuối của từng delta SSE. Nếu trim tại đây,
-     mỗi token/chunk sẽ mất khoảng trắng dẫn tới chữ Việt bị dính liền nhau. */
-  return String(out || '');
+  return String(out || '').trim();
 }
 
 function parseBaiRawResponse(raw, { allowReasoning = false } = {}) {
@@ -716,7 +688,7 @@ function parseBaiRawResponse(raw, { allowReasoning = false } = {}) {
   }
 }
 
-async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
+async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
   const key = String(apiKey || BAI_API_KEY || '').trim();
   if (!key) throw new Error('NO_BAI_KEY');
 
@@ -725,7 +697,7 @@ async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, tempe
   const minTokens = json ? 1024 : 256;
   const effectiveMaxTokens = Math.max(Number(maxTokens) || 0, minTokens);
   const baseBody = {
-    model: modelId,
+    model: BAI_MODEL_ID,
     messages: [{ role: 'user', content: String(prompt || '') }],
     temperature,
     max_tokens: effectiveMaxTokens
@@ -733,34 +705,29 @@ async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, tempe
 
   let lastErr = null;
   for (const authMode of ['bearer', 'x-api-key']) {
-    /* QUICK ưu tiên non-stream để giảm overhead; Deep mode vẫn ưu tiên SSE như mẫu B.AI. */
-    const streamModes = effectiveMaxTokens <= 1600 ? [false, true] : [true, false];
-    for (const streamMode of streamModes) {
+    /* Lượt 1 stream=true; nếu gateway cụ thể không stream được thì lượt 2 non-stream. */
+    for (const streamMode of [true, false]) {
       try {
         const body = { ...baseBody, stream: streamMode };
-        const { res, raw } = await baiFetchText(BAI_ENDPOINT, {
+        const res = await baiFetch(BAI_ENDPOINT, {
           method: 'POST', key, authMode, body, timeoutMs
         });
         if (!res.ok) {
-          let detail = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 900);
-          lastErr = new Error(`BAI_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
-          lastErr.status = res.status;
-          /* 401 = credential không hợp lệ/hết hạn. Bearer và x-api-key dùng cùng secret,
-             nên KHÔNG gọi lặp transport/auth khác. Dừng ngay để tránh 3-4 request 401 liên tiếp. */
-          if (res.status === 401) throw lastErr;
-          /* 403 có thể là quyền model/tài khoản; cũng không đổi transport vô ích. */
-          if (res.status === 403) throw lastErr;
-          /* Nếu stream bị gateway từ chối, thử transport còn lại ngay. */
+          lastErr = await baiReadError(res);
+          /* Sai auth Bearer có thể thử x-api-key. */
+          if ((res.status === 401 || res.status === 403) && authMode === 'bearer') break;
+          /* Nếu stream bị gateway từ chối, thử non-stream ngay. */
           if (streamMode && [400,404,405,406,415,422,500,502,503].includes(res.status)) continue;
           throw lastErr;
         }
 
+        const raw = await res.text();
         const parsed = parseBaiRawResponse(raw, { allowReasoning: false });
         const answer = String(parsed.text || '').trim();
         if (answer) {
           try {
             window.__IDECO_HUYEN_PRIMARY_AI_LAST__ = {
-              provider: 'B.AI', model: modelId, at: Date.now(), key: maskBaiKey(key), authMode,
+              provider: 'B.AI', model: BAI_MODEL_ID, at: Date.now(), key: maskBaiKey(key), authMode,
               stream: parsed.isStream, finishReason: parsed.finishReason || ''
             };
           } catch (_) {}
@@ -771,7 +738,7 @@ async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, tempe
         try {
           const rawPreview = String(raw || '').replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-••••').slice(0, 1200);
           console.warn('[B.AI EMPTY RESPONSE]', {
-            model: modelId, authMode, stream: streamMode,
+            model: BAI_MODEL_ID, authMode, stream: streamMode,
             contentType: res.headers.get('content-type') || '',
             finishReason: parsed.finishReason || '', rawPreview
           });
@@ -781,31 +748,21 @@ async function callBaiModel(prompt, { modelId = BAI_MODEL_ID, json = true, tempe
         if (streamMode) continue;
       } catch (e) {
         lastErr = e;
-        const em = String(e?.message || e);
-        if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT|BAI_HTTP_401|BAI_HTTP_403/.test(em)) throw e;
-        /* Chỉ thử transport/auth tiếp theo với lỗi nội dung hoặc gateway tạm thời. */
+        if (/BAI_BROWSER_FETCH_FAILED|BAI_TIMEOUT/.test(String(e?.message || e))) throw e;
+        /* Cho phép thử transport/auth tiếp theo với lỗi nội dung hoặc gateway. */
       }
     }
   }
   throw lastErr || new Error('BAI_FAIL');
 }
 
-async function callDeepSeekBai(prompt, opts = {}) {
-  return callBaiModel(prompt, { ...opts, modelId: BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH] });
-}
-async function callHy3Bai(prompt, opts = {}) {
-  return callBaiModel(prompt, { ...opts, modelId: BAI_MODEL_IDS[HUYEN_AI_PROVIDERS.TENCENT_HY3] });
-}
-
-async function diagnoseBaiConnection(apiKey = null, provider = HUYEN_PRIMARY_AI_PROVIDER) {
+async function diagnoseBaiConnection(apiKey = null) {
   const key = String(apiKey || BAI_API_KEY || '').trim();
-  const modelId = getBaiModelId(provider);
   if (!key) throw new Error('NO_BAI_KEY');
 
   /* Kiểm tra đúng đường gọi thực tế trước: POST /chat/completions.
      GET /models chỉ là kiểm tra bổ sung, không được làm nút test báo lỗi giả khi chat endpoint vẫn chạy. */
-  const text = await callBaiModel('Trả lời ngắn gọn đúng một từ: OK', {
-    modelId,
+  const text = await callDeepSeekBai('Trả lời ngắn gọn đúng một từ: OK', {
     json: false, temperature: 0, maxTokens: 2048, apiKey: key
   });
   const last = (typeof window !== 'undefined' && window.__IDECO_HUYEN_PRIMARY_AI_LAST__) || {};
@@ -814,8 +771,8 @@ async function diagnoseBaiConnection(apiKey = null, provider = HUYEN_PRIMARY_AI_
   let modelsCheckSkipped = false;
   try {
     modelInfo = await baiListModels(key);
-    if (modelInfo.ids.length && !modelInfo.ids.includes(modelId)) {
-      const e = new Error(`BAI_MODEL_NOT_AVAILABLE — ${modelId}`);
+    if (modelInfo.ids.length && !modelInfo.ids.includes(BAI_MODEL_ID)) {
+      const e = new Error(`BAI_MODEL_NOT_AVAILABLE — ${BAI_MODEL_ID}`);
       e.availableModels = modelInfo.ids.slice(0, 30);
       throw e;
     }
@@ -830,40 +787,49 @@ async function diagnoseBaiConnection(apiKey = null, provider = HUYEN_PRIMARY_AI_
   };
 }
 
-/* Chế độ Huyền: model BGĐ chọn là AI chính.
-   - DeepSeek V4 Flash/B.AI lỗi -> chuyển ngay Gemini 3.7 Flash qua Kie.ai.
-   - Gemini của Huyền = Gemini 3.7 Flash Kie.ai, KHÔNG dùng Gemini 3.6.
+/* Tuyến AI Huyền — bản ổn định, không dùng Kie ngoài Turbo.
+   - file://: KHÔNG gọi B.AI; dùng Gemini AI Studio để tránh CORS/security-origin.
+   - http/https: theo AI chính BGĐ chọn; lỗi mới chuyển sang tuyến còn lại.
+   - Gemini 3.7/Kie chỉ được gọi trong callHuyenTurbo khi người dùng BẬT Turbo.
 */
 async function callHuyenPrimaryAI(prompt, { json = true, temperature = 0.10, maxTokens = 4200, timeoutMs = 42000, fallbackTimeoutMs = 55000 } = {}) {
   const provider = normalizeHuyenAiProvider(HUYEN_PRIMARY_AI_PROVIDER);
-  if (isBaiProvider(provider)) {
-    const primaryModelId = getBaiModelId(provider);
-    const alternateProvider = provider === HUYEN_AI_PROVIDERS.TENCENT_HY3
-      ? HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
-      : HUYEN_AI_PROVIDERS.TENCENT_HY3;
-    const alternateModelId = getBaiModelId(alternateProvider);
+  const studioModel = normalizeGeminiStudioModel(GEMINI_STUDIO_MODEL);
+  const isDeepRequest = Number(maxTokens || 0) > 3200;
+  const baiTimeout = Math.min(Number(timeoutMs) || 42000, isDeepRequest ? 12000 : 7000);
+  const studioTimeout = Math.min(Number(fallbackTimeoutMs) || 55000, isDeepRequest ? 45000 : 30000);
+
+  const callStudio = async () => callGemini(prompt, {
+    model: studioModel, json, temperature, maxTokens, timeoutMs: studioTimeout
+  });
+  const callBai = async () => callDeepSeekBai(prompt, {
+    json, temperature, maxTokens, timeoutMs: baiTimeout
+  });
+
+  /* Chrome file://: bỏ B.AI hoàn toàn, không chờ timeout và không tạo request CORS tới B.AI. */
+  if (isFileProtocol()) {
+    try { window.__IDECO_HUYEN_FILE_SAFE__ = { at: Date.now(), skipped: 'B.AI', used: `Gemini Studio/${studioModel}` }; } catch (_) {}
+    return await callStudio();
+  }
+
+  if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) {
     try {
-      return await callBaiModel(prompt, { modelId: primaryModelId, json, temperature, maxTokens, timeoutMs });
-    } catch (primaryErr) {
-      console.warn(`[HUYEN] ${huyenAiProviderLabel(provider)} lỗi, thử ${huyenAiProviderLabel(alternateProvider)} bằng cùng B.AI key:`, primaryErr);
-      try {
-        window.__IDECO_HUYEN_BAI_FALLBACK__ = { at: Date.now(), from: primaryModelId, to: alternateModelId, reason: String(primaryErr?.message || primaryErr) };
-      } catch (_) {}
-      const msg = String(primaryErr?.message || primaryErr || '');
-      if (!/401|403|invalid.?key|permission|denied/i.test(msg)) {
-        try {
-          return await callBaiModel(prompt, {
-            modelId: alternateModelId, json, temperature, maxTokens,
-            timeoutMs: Math.min(Math.max(12000, timeoutMs), 26000)
-          });
-        } catch (alternateErr) {
-          console.warn(`[HUYEN] ${huyenAiProviderLabel(alternateProvider)} cũng lỗi, chuyển Gemini 3.7 Flash/Kie.ai:`, alternateErr);
-        }
-      }
-      return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
+      return await callBai();
+    } catch (deepseekErr) {
+      console.warn(`[HUYEN] DeepSeek/B.AI lỗi -> Gemini AI Studio ${studioModel}:`, deepseekErr);
+      try { window.__IDECO_HUYEN_BAI_FALLBACK__ = { at: Date.now(), reason: String(deepseekErr?.message || deepseekErr), to: studioModel }; } catch (_) {}
+      return await callStudio();
     }
   }
-  return await callHuyenTurbo(prompt, { json, timeoutMs: fallbackTimeoutMs });
+
+  /* Khi BGĐ chọn Gemini Studio làm AI chính: Studio trước, B.AI chỉ là dự phòng trên http/https. */
+  try {
+    return await callStudio();
+  } catch (studioErr) {
+    console.warn(`[HUYEN] Gemini AI Studio ${studioModel} lỗi -> DeepSeek/B.AI:`, studioErr); try { window.__IDECO_HUYEN_LAST_AI_ERROR__ = { at: Date.now(), error: String(studioErr?.message || studioErr), model: studioModel }; } catch (_) {}
+    try { window.__IDECO_HUYEN_STUDIO_FALLBACK__ = { at: Date.now(), reason: String(studioErr?.message || studioErr), to: 'DeepSeek V4 Flash' }; } catch (_) {}
+    return await callBai();
+  }
 }
 
 /* V9.8 — chống đứt giữa chừng: chỉ tự nối lại 1 lần với lỗi tạm thời.
@@ -887,24 +853,11 @@ async function waitHuyenNetworkBriefly(maxMs = 12000) {
   });
 }
 async function callHuyenPrimaryAIStable(prompt, opts = {}) {
-  let lastErr = null;
-  const retryCount = Math.max(1, Math.min(2, Number(opts.retryCount || 2)));
   const callOpts = { ...opts };
   delete callOpts.retryCount;
-  for (let attempt = 1; attempt <= retryCount; attempt++) {
-    try {
-      await waitHuyenNetworkBriefly();
-      return await callHuyenPrimaryAI(prompt, callOpts);
-    } catch (e) {
-      lastErr = e;
-      if (attempt >= retryCount || !isHuyenTransientAiError(e)) throw e;
-      try {
-        window.__IDECO_HUYEN_RECONNECT__ = { at: Date.now(), attempt: attempt + 1, reason: String(e?.message || e) };
-      } catch (_) {}
-      await new Promise(resolve => setTimeout(resolve, 1200));
-    }
-  }
-  throw lastErr || new Error('HUYEN_RECONNECT_FAILED');
+  await waitHuyenNetworkBriefly(3500);
+  /* Một request tuyến chính + fallback nội bộ là đủ; không lặp cả chuỗi lần hai. */
+  return await callHuyenPrimaryAI(prompt, callOpts);
 }
 
 /* ---------------- HUYỀN TURBO — Gemini 3.7 Flash qua Kie.ai ----------------
@@ -944,8 +897,8 @@ async function callHuyenTurbo(prompt, { json = true, timeoutMs = 55000 } = {}) {
   };
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), Math.max(8000, Number(timeoutMs) || 55000));
-  let res, rawText = '';
+  const timer = setTimeout(() => ctl.abort(), Math.max(15000, Number(timeoutMs) || 55000));
+  let res;
   try {
     res = await fetch(KIE_TURBO_ENDPOINT, {
       method: 'POST',
@@ -956,19 +909,17 @@ async function callHuyenTurbo(prompt, { json = true, timeoutMs = 55000 } = {}) {
       body: JSON.stringify(body),
       signal: ctl.signal
     });
-    rawText = await res.text();
-  } catch (e) {
-    if (e?.name === 'AbortError') throw new Error('TURBO_TIMEOUT');
-    throw e;
   } finally { clearTimeout(timer); }
 
   if (!res.ok) {
-    const detail = String(rawText || '').slice(0, 600);
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 600); } catch (e) {}
     const err = new Error(`TURBO_HTTP_${res.status}${detail ? ' — ' + detail : ''}`);
     err.status = res.status;
     throw err;
   }
 
+  const rawText = await res.text();
   let answer = '';
 
   /* Kie có thể trả SSE (data: {...}) hoặc JSON/JSON-array tùy gateway. */
@@ -992,72 +943,126 @@ async function callHuyenTurbo(prompt, { json = true, timeoutMs = 55000 } = {}) {
   return answer;
 }
 
-async function callGemini(prompt, { model = 'gemini-3.6-flash', json = true, tools = null, temperature } = {}) {
+function extractGeminiInteractionText(data) {
+  if (!data || typeof data !== 'object') return '';
+  if (typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  let lastModelText = '';
+  for (const step of steps) {
+    if (!step || typeof step !== 'object') continue;
+    if (step.type !== 'model_output' && !Array.isArray(step.content)) continue;
+    const parts = Array.isArray(step.content) ? step.content : [];
+    let chunk = '';
+    for (const p of parts) {
+      if (!p || typeof p !== 'object') continue;
+      if ((p.type === 'text' || typeof p.text === 'string') && typeof p.text === 'string') chunk += p.text;
+    }
+    if (chunk.trim()) lastModelText = chunk.trim();
+  }
+  return lastModelText;
+}
+
+function geminiThinkingLevelFor(model, maxTokens) {
+  const m = String(model || '').toLowerCase();
+  const deep = Number(maxTokens || 0) > 3200;
+  /* Gemini 3.7/3.6/3.5 va 2.5 deu ho tro thinking level; low uu tien do tre, medium cho phan tich sau. */
+  if (/gemini-(?:3\.7|3\.6|3\.5|2\.5)-(?:flash|flash-lite|pro)/.test(m)) return deep ? 'medium' : 'low';
+  return null;
+}
+
+async function callGemini(prompt, { model = null, json = true, tools = null, temperature, maxTokens = 3200, timeoutMs = 30000 } = {}) {
   const entries = geminiKeyEntries();
   if (!entries.length) throw new Error('NO_KEY');
+  const chosenModel = normalizeGeminiStudioModel(model || GEMINI_STUDIO_MODEL);
 
-  // Bắt đầu từ key đã chạy thành công gần nhất, nhưng bỏ qua key đang cooldown.
   const start = Math.min(GEMINI_ACTIVE_KEY_INDEX, Math.max(0, entries.length - 1));
   const ordered = entries.slice(start).concat(entries.slice(0, start));
   const ready = ordered.filter(x => !isKeyCooling(x.key));
-  const queue = ready.length ? ready : ordered; // Nếu tất cả cooldown, vẫn thử lại lần lượt.
+  const queue = ready.length ? ready : ordered;
 
   let lastErr = null;
   for (const entry of queue) {
     try {
-      const body = { contents: [{ parts: [{ text: prompt }] }] };
-      const cfg = {};
-      if (json && !tools) cfg.responseMimeType = 'application/json';
-      if (temperature !== undefined) cfg.temperature = temperature;
-      if (Object.keys(cfg).length) body.generationConfig = cfg;
-      if (tools) body.tools = tools;
+      /* Gemini API moi: Interactions API. Dung duoc voi Auth key AQ. va Standard key.
+         Khong gui temperature cho cac model moi de tranh loi tham so deprecated. */
+      const gen = {
+        max_output_tokens: Math.max(256, Math.min(8192, Number(maxTokens) || 3200))
+      };
+      const thinkingLevel = geminiThinkingLevelFor(chosenModel, maxTokens);
+      if (thinkingLevel) gen.thinking_level = thinkingLevel;
+
+      const body = {
+        model: chosenModel,
+        input: String(prompt || ''),
+        store: false,
+        generation_config: gen
+      };
+      if (json && !tools) {
+        body.response_format = { type: 'text', mime_type: 'application/json' };
+      }
+      if (Array.isArray(tools) && tools.length) {
+        body.tools = tools.map(t => {
+          if (t && t.google_search !== undefined) return { type: 'google_search' };
+          if (t && t.type) return t;
+          return t;
+        }).filter(Boolean);
+      }
 
       const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), 45000);
+      const timer = setTimeout(() => ctl.abort(), Math.max(10000, Number(timeoutMs) || 30000));
       let res;
       try {
-        res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(entry.key)}`,
-          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctl.signal }
-        );
+        res = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': entry.key },
+          body: JSON.stringify(body),
+          signal: ctl.signal,
+          cache: 'no-store'
+        });
       } finally { clearTimeout(timer); }
 
       if (!res.ok) {
         let detail = '';
-        try { detail = (await res.text()).slice(0, 500); } catch (e) {}
-        const err = new Error(`HTTP ${res.status}${detail ? ' — ' + detail : ''}`);
-        err.status = res.status; err.keyLabel = entry.label;
+        try { detail = (await res.text()).replace(/\s+/g, ' ').trim().slice(0, 900); } catch (e) {}
+        const err = new Error(`GEMINI_HTTP_${res.status} [${chosenModel}]${detail ? ' — ' + detail : ''}`);
+        err.status = res.status; err.keyLabel = entry.label; err.model = chosenModel;
         lastErr = err;
 
-        // 429/quota: nghỉ key này 2 phút; lỗi auth: nghỉ 10 phút; 5xx: nghỉ 30 giây.
         if (res.status === 429) GEMINI_KEY_COOLDOWN.set(entry.key, Date.now() + 120000);
         else if (res.status === 401 || res.status === 403) GEMINI_KEY_COOLDOWN.set(entry.key, Date.now() + 600000);
         else if (res.status >= 500) GEMINI_KEY_COOLDOWN.set(entry.key, Date.now() + 30000);
 
-        // Với lỗi có thể khắc phục bằng key khác thì tự chuyển ngay.
-        if ([401,403,408,429].includes(res.status) || res.status >= 500) continue;
-        // Các lỗi 4xx khác thường do request/model, đổi key cũng không giúp; vẫn thử key kế để dự phòng.
+        try { console.warn('[HUYEN GEMINI INTERACTIONS]', entry.label, chosenModel, `HTTP ${res.status}`, detail.slice(0, 350)); } catch (_) {}
         continue;
       }
 
       const data = await res.json();
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const text = parts.map(p => p.text || '').join('').trim();
+      const text = extractGeminiInteractionText(data);
       if (text) {
         const realIndex = entries.findIndex(x => x.key === entry.key);
         if (realIndex >= 0) GEMINI_ACTIVE_KEY_INDEX = realIndex;
         GEMINI_KEY_COOLDOWN.delete(entry.key);
-        window.__IDECO_GEMINI_LAST_KEY__ = { label: entry.label, masked: maskGeminiKey(entry.key), at: Date.now() };
+        window.__IDECO_GEMINI_LAST_KEY__ = {
+          label: entry.label, masked: maskGeminiKey(entry.key), model: chosenModel,
+          api: 'interactions', status: data?.status || 'completed', at: Date.now()
+        };
         return text;
       }
-      lastErr = Object.assign(new Error('EMPTY'), { keyLabel: entry.label });
+
+      const status = String(data?.status || '');
+      lastErr = Object.assign(new Error(`GEMINI_EMPTY [${chosenModel}] status=${status || 'unknown'}`), {
+        keyLabel: entry.label, model: chosenModel, interactionStatus: status
+      });
     } catch (e) {
       lastErr = e;
-      // Timeout/network: chuyển sang key kế tiếp, tránh treo phân tích.
-      if (e && e.name === 'AbortError') GEMINI_KEY_COOLDOWN.set(entry.key, Date.now() + 30000);
+      if (e && e.name === 'AbortError') {
+        GEMINI_KEY_COOLDOWN.set(entry.key, Date.now() + 30000);
+        lastErr = new Error(`GEMINI_TIMEOUT [${chosenModel}]`);
+      }
     }
   }
-  throw lastErr || new Error('AI_FAIL');
+  try { window.__IDECO_HUYEN_LAST_AI_ERROR__ = { at: Date.now(), error: String(lastErr?.message || lastErr || ''), model: chosenModel }; } catch (_) {}
+  throw lastErr || new Error(`GEMINI_ALL_KEYS_FAILED [${chosenModel}]`);
 }
 
 function safeJson(txt, fallback) {
@@ -1130,7 +1135,7 @@ async function analyzeAndRefineReport(text, customerFeedback = '') {
     }
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
+    const raw = await callGemini(prompt, { model: GEMINI_STUDIO_MODEL, json: true });
     const r = safeJson(raw, null);
     if (!r) return { status: 'warning', text, message: 'Lỗi xử lý dữ liệu AI.' };
     return { status: 'success', text: r.refinedText || text, message: r.advice || 'Đã chuẩn hóa văn bản.' };
@@ -1224,7 +1229,7 @@ async function searchCustomerInfo(inputData) {
     Trả về mảng JSON: [{"name":"","representative":"","phone":"","address":"","establishedYear":""}]
   `;
   try {
-    const raw = await callGemini(prompt, { model: 'gemini-3.6-flash', json: true });
+    const raw = await callGemini(prompt, { model: GEMINI_STUDIO_MODEL, json: true });
     return safeJson(raw, []);
   } catch (e) { return []; }
 }
@@ -1283,11 +1288,17 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false, mode = '
     kbRelevant: 6, kbNewest: 2, kbMax: 8, kbItemChars: 5000, kbTotalChars: 22000,
     maxTokens: 6500, repairTokens: 2200, timeoutMs: 95000, fallbackTimeoutMs: 85000, retryCount: 2
   } : {
-    /* QUICK thật sự: context rất gọn + output ngắn + cắt model chậm sớm. */
-    appointments: 4, reportChars: 2800, feedbackChars: 1400,
-    kbRelevant: 1, kbNewest: 0, kbMax: 1, kbItemChars: 1300, kbTotalChars: 1600,
-    maxTokens: 1350, repairTokens: 650, timeoutMs: 15000, fallbackTimeoutMs: 19000, retryCount: 1
+    appointments: 8, reportChars: 5500, feedbackChars: 2600,
+    kbRelevant: 2, kbNewest: 1, kbMax: 3, kbItemChars: 2200, kbTotalChars: 5200,
+    maxTokens: 2800, repairTokens: 1100, timeoutMs: 28000, fallbackTimeoutMs: 33000, retryCount: 1
   };
+
+  const memoryFingerprint = huyenAnalysisFingerprint(customer, analysisMode);
+  const memorySlot = `${customer.id || customer.name || 'customer'}::${analysisMode}`;
+  const memoryCached = HUYEN_ANALYSIS_CACHE.get(memorySlot);
+  if (memoryCached && memoryCached.fingerprint === memoryFingerprint && memoryCached.result) {
+    return { ...memoryCached.result, _huyenMeta: { ...(memoryCached.result._huyenMeta || {}), memoryHit: true, memorySource: 'session' } };
+  }
 
   /*
      HUYỀN SMART SALES ADVISOR V5 — 2 CHẾ ĐỘ NHANH / SÂU + BÁM DỮ LIỆU
@@ -1440,18 +1451,7 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false, mode = '
   const isNotSuccessful = signalFlags.refusalOrNoInterest || /khong thanh cong|khong hop tac|tu choi/i.test(foldVN(statusText));
 
   /* ---------- 3) CHỌN KHO KIẾN THỨC LIÊN QUAN NHẤT, TRÁNH NHỒI TOÀN BỘ ---------- */
-  let kbRaw = null;
-  if (isDeepMode) {
-    kbRaw = await getHuyenKnowledgeCached();
-  } else if (HUYEN_KB_CACHE.data !== null) {
-    kbRaw = HUYEN_KB_CACHE.data;
-  } else {
-    /* Quick mode không được đứng chờ Firebase lâu. Vẫn khởi động tải nền để lần sau có cache. */
-    kbRaw = await Promise.race([
-      getHuyenKnowledgeCached().catch(() => null),
-      new Promise(resolve => setTimeout(() => resolve(null), 900))
-    ]);
-  }
+  const kbRaw = await getHuyenKnowledgeCached();
   const kb = normalizeKnowledgeEntries(kbRaw);
   const stopWords = new Set(['cua','cho','voi','nhung','cac','ban','khach','hang','nhan','vien','cong','ty','ideco','nay','kia','mot','nhieu','trong','ngoai','khi','neu','thi','la','va','de','duoc','dang','da','se','ve','tai','tu','theo','can','nen','hay','phai']);
   const contextTerms = Array.from(new Set(
@@ -1491,7 +1491,7 @@ async function analyzeLatestCustomerStrategy(customer, { turbo = false, mode = '
   /* ---------- 4) PROMPT CỐ VẤN: EVIDENCE -> TIMELINE -> PHẢN ĐỐI -> CHỐT ----------
      V4 FAST: giảm mạnh context/token, ưu tiên hành động chốt quan trọng; chỉ giữ Kho kiến thức liên quan nhất + cache 5 phút.
   */
-  const deepPrompt = `
+  const prompt = `
 Bạn là HUYỀN — CỐ VẤN KINH DOANH CẤP CAO của IDECO, được Chú Triết đào tạo để hỗ trợ nhân viên xử lý tình huống khách hàng trong ngành dược/nhà thuốc.
 
 MỤC TIÊU DUY NHẤT:
@@ -1582,73 +1582,6 @@ TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   "finalAdvice":"Kết luận 4-6 câu như lời góp ý của quản lý: việc số 1 cần làm ngay, vì sao, mục tiêu chốt, dấu hiệu thành công, phương án dự phòng và giới hạn không được tự hứa"
 }`;
 
-  /* QUICK MODE V6 — prompt riêng, ngắn hơn rất nhiều để ưu tiên thời gian phản hồi.
-     Chỉ yêu cầu các trường thực sự cần để nhân viên hành động ngay. */
-  const fastPrompt = `
-Bạn là HUYỀN — cố vấn bán hàng của IDECO. Hãy đọc dữ liệu thật dưới đây và đưa ra góp ý NHANH, CỤ THỂ, DỄ ĐỌC để nhân viên biết ngay nên làm gì ở lần liên hệ tiếp theo.
-
-MỤC TIÊU:
-- Không viết lý thuyết dài.
-- Không bịa giá, chiết khấu, công nợ, đổi trả, chính sách hoặc phản hồi khách.
-- Phân biệt rõ dữ kiện và suy luận.
-- Ưu tiên 3 việc có tác động lớn nhất tới khả năng tiến gần chốt.
-- Nếu chưa đủ dữ liệu, nói rõ cần hỏi gì.
-- Văn bản tiếng Việt PHẢI có khoảng trắng đúng giữa các từ, dấu câu chuẩn, câu ngắn và rõ.
-- Mỗi trường nên 1-3 câu; chỉ "finalAdvice" tối đa 4 câu.
-
-KHÁCH HÀNG:
-Tên: ${clipText(customer.name, 300)}
-Người liên hệ: ${clipText(customer.contactPerson, 180)}
-Loại khách: ${clipText(customer.type, 120)}
-Trạng thái: ${clipText(statusText, 180)}
-Báo cáo mới nhất:
-${clipText(customer.report || '(trống)', modeCfg.reportChars)}
-Phản hồi khách hàng:
-${clipText(customer.customerFeedback || '(trống)', modeCfg.feedbackChars)}
-Các lịch hẹn gần nhất:
-${JSON.stringify(appts)}
-
-MỐC THỜI GIAN TÓM TẮT:
-${JSON.stringify({
-  recordAgeDays: timelineSummary.recordAgeDays,
-  daysSinceLastRecordActivity: timelineSummary.daysSinceLastRecordActivity,
-  latestOverdueAppointment: timelineSummary.latestOverdueAppointment,
-  nextOpenAppointment: timelineSummary.nextOpenAppointment
-})}
-
-TÍN HIỆU SƠ BỘ:
-${JSON.stringify(signalFlags)}
-
-KHO KIẾN THỨC LIÊN QUAN NHẤT (nếu tải kịp):
-${knowledgeText || '(Quick mode chưa có mục phù hợp hoặc đang tải nền)'}
-
-HÃY TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
-{
-  "situationSummary":"2-3 câu tóm tắt đúng tình hình hiện tại",
-  "stage":"Giai đoạn Sales ngắn gọn",
-  "priority":"Cao|Trung bình|Thấp",
-  "mainBarrier":"1-2 câu về rào cản chính; nếu là suy luận phải nói rõ",
-  "customerMindset":"1-2 câu đánh giá thận trọng tâm thế khách",
-  "questionsToAsk":["Tối đa 3 câu hỏi quan trọng nhất cần hỏi"],
-  "recommendedActions":[
-    {"step":1,"action":"Việc cần làm ngay","reason":"Vì sao","goal":"Kết quả cần đạt","suggestedScript":"Một câu có thể nói với khách"}
-  ],
-  "closingPlan":{
-    "objective":"Mục tiêu thực tế của lần liên hệ tới",
-    "minimumCommitment":"Cam kết nhỏ nhất cần xin khách",
-    "fallback":"Nếu khách chưa đồng ý thì làm gì"
-  },
-  "nextConversationPlan":{
-    "opening":"Một cách mở đầu ngắn, tự nhiên",
-    "discovery":"Điểm cần hỏi/khai thác nhất",
-    "close":"Câu xin cam kết nhỏ nhất"
-  },
-  "nextFollowUp":"Thời điểm/cách theo dõi tiếp nếu dữ liệu cho phép",
-  "finalAdvice":"3-4 câu kết luận: việc số 1 cần làm, điều phải hỏi, mục tiêu chốt và điều không được tự hứa"
-}`;
-
-  const prompt = isDeepMode ? deepPrompt : fastPrompt;
-
   let raw = '';
   let turboFailed = false;
   let turboError = null;
@@ -1680,7 +1613,7 @@ HÃY TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
   if (!r) {
     const repairPrompt = `Sửa NHANH nội dung sau thành JSON hợp lệ. Không thêm phân tích mới, không markdown, không bịa dữ liệu. Chỉ sửa cấu trúc JSON:\n${clipText(raw, 8000)}`;
     try {
-      const repaired = await callHuyenPrimaryAIStable(repairPrompt, { json: true, temperature: 0.01, maxTokens: modeCfg.repairTokens, timeoutMs: isDeepMode ? Math.min(modeCfg.timeoutMs, 32000) : 9000, fallbackTimeoutMs: isDeepMode ? Math.min(modeCfg.fallbackTimeoutMs, 32000) : 11000, retryCount: 1 });
+      const repaired = await callHuyenPrimaryAIStable(repairPrompt, { json: true, temperature: 0.01, maxTokens: modeCfg.repairTokens, timeoutMs: Math.min(modeCfg.timeoutMs, 32000), fallbackTimeoutMs: Math.min(modeCfg.fallbackTimeoutMs, 32000), retryCount: 1 });
       r = safeJson(repaired, null);
     } catch (e) {}
   }
@@ -1694,23 +1627,12 @@ HÃY TRẢ VỀ JSON CHUẨN, KHÔNG MARKDOWN:
     timelineSummary,
     signalFlags,
     knowledgeCandidates: kb.length,
-    knowledgeSelected: kbForPrompt.length
+    knowledgeSelected: kbForPrompt.length,
+    memoryHit: false
   };
+  HUYEN_ANALYSIS_CACHE.set(memorySlot, { fingerprint: memoryFingerprint, result: r, at: Date.now() });
   return r;
 }
-
-/* Chuẩn hóa nhẹ văn bản Huyền trước khi hiển thị.
-   Không tự thêm khoảng trắng giữa các "từ" vì không thể đoán an toàn; lỗi dính chữ từ SSE đã được sửa tại parser. */
-function huyenDisplayText(v) {
-  return String(v ?? '')
-    .replace(/\u00A0/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\s+([,.;:!?])/g, '$1')
-    .replace(/([,.;:!?])(?=[A-Za-zÀ-ỹ])/g, '$1 ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 
 /* Doc noi dung PDF/Word de dua vao Kho kien thuc; chi luu TEXT, khong luu file nhi phan */
 async function extractKnowledgeFileText(file) {
@@ -2160,8 +2082,9 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
-  /* AI chính của Huyền: Gemini 3.7 Flash/Kie.ai, DeepSeek V4 Flash/B.AI hoặc Tencent Hy3/B.AI */
+  /* AI chính của Huyền: Gemini AI Studio hoặc DeepSeek V4 Flash/B.AI */
   const [huyenPrimaryAi, setHuyenPrimaryAi] = useState(HUYEN_AI_PROVIDERS.GEMINI);
+  const [geminiStudioModel, setGeminiStudioModelState] = useState('gemini-3.7-flash');
   const [baiApiKey, setBaiApiKeyState] = useState(BAI_DEFAULT_API_KEY);
   /* BGĐ kiểm soát quyền dùng Huyền Turbo / credit qua Firebase */
   const [turboControl, setTurboControl] = useState({ allowed: true, defaultOn: false, locked: false });
@@ -2325,15 +2248,19 @@ function App() {
     });
     const offHuyenAi = dbOnValue('settings/huyenAiConfig', (v) => {
       const provider = normalizeHuyenAiProvider(v?.provider || HUYEN_AI_PROVIDERS.GEMINI);
+      const studioModel = normalizeGeminiStudioModel(v?.geminiStudioModel || v?.studioModel || 'gemini-3.7-flash');
       const savedKey = String(v?.baiApiKey || '').trim();
       const key = resolveBaiApiKey(savedKey);
       setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
+      setGeminiStudioModelState(studioModel); setGeminiStudioModel(studioModel);
       setBaiApiKeyState(key); setBaiApiKey(key);
 
-      /* Nếu Firebase còn key cũ/hết hạn đã biết, không dùng lại. Không tự ghi đè Firebase:
-         quản trị cần nhập key mới rồi bấm Lưu để cập nhật cho toàn bộ thiết bị. */
-      if (v && savedKey && BAI_REVOKED_API_KEYS.has(savedKey)) {
-        console.warn('[B.AI] Phát hiện API key cũ/hết hạn trong Firebase — đã vô hiệu hóa tại máy này. Hãy nhập key mới trong Cài đặt.');
+      /* Nếu Firebase còn đúng key mặc định cũ của bản trước thì nâng sang key mới một lần.
+         Key do quản trị tự nhập khác key cũ sẽ được giữ nguyên, không bị ghi đè. */
+      if (v && savedKey && BAI_LEGACY_DEFAULT_KEYS.has(savedKey)) {
+        dbSet('settings/huyenAiConfig', {
+          ...v, baiApiKey: BAI_DEFAULT_API_KEY, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now()
+        }).catch(() => {});
       }
     });
     const offTurboControl = dbOnValue('settings/huyenTurboControl', (v) => {
@@ -2794,40 +2721,38 @@ function App() {
   const handleSaveHuyenAiConfig = async () => {
     if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
     const provider = normalizeHuyenAiProvider(document.getElementById('huyenPrimaryAiInput')?.value || HUYEN_AI_PROVIDERS.GEMINI);
+    const studioModel = normalizeGeminiStudioModel(document.getElementById('geminiStudioModelInput')?.value || geminiStudioModel || 'gemini-3.7-flash');
     const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
-    if (isBaiProvider(provider) && !key) {
-      notify('Bạn chưa nhập API key B.AI cho model đã chọn.', 'error', 4500); return;
+    if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH && !key && !isFileProtocol()) {
+      notify('Bạn chưa nhập API key B.AI cho DeepSeek V4 Flash.', 'error', 4500); return;
     }
     if (key && !/^sk-[A-Za-z0-9_-]{12,}$/.test(key)) {
       notify('API key B.AI chưa đúng định dạng thông thường sk-…', 'error', 4500); return;
     }
-    if (BAI_REVOKED_API_KEYS.has(key)) {
-      notify('API key B.AI này đã được xác định là hết hạn/không hợp lệ. Hãy nhập key B.AI mới trước khi lưu.', 'error', 7000); return;
-    }
-    const payload = { provider, baiApiKey: key, model: getBaiModelId(provider), baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
+    const payload = { provider, geminiStudioModel: studioModel, baiApiKey: key, model: BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
     const ok = await dbSet('settings/huyenAiConfig', payload);
     if (!ok) { notify('Không lưu được lựa chọn AI Huyền lên Firebase.', 'error'); return; }
     setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
+    setGeminiStudioModelState(studioModel); setGeminiStudioModel(studioModel);
     setBaiApiKeyState(key); setBaiApiKey(key);
-    notify(isBaiProvider(provider)
-      ? `Đã chọn ${huyenAiProviderLabel(provider)} làm AI chính. Nếu model này lỗi, Huyền thử model B.AI còn lại bằng cùng API key rồi mới chuyển Gemini 3.7 Flash/Kie.ai.`
-      : 'Đã chọn Gemini 3.7 Flash/Kie.ai làm AI chính cho Huyền.', 'success', 6200);
+    HUYEN_ANALYSIS_CACHE.clear();
+    notify(provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH
+      ? `Đã lưu AI chính DeepSeek V4 Flash; dự phòng Gemini AI Studio ${studioModel}. Khi mở file:// hệ thống tự bỏ B.AI và dùng Studio.`
+      : `Đã lưu Gemini AI Studio ${studioModel} làm AI chính; DeepSeek chỉ dự phòng khi chạy http/https.`, 'success', 6200);
   };
 
   const handleTestBai = async () => {
     if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
-    const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
-    if (!key) { notify('Nhập API key B.AI mới trước khi kiểm tra.', 'error'); return; }
-    if (BAI_REVOKED_API_KEYS.has(key)) {
-      notify('Key B.AI này đã trả HTTP 401 (hết hạn/không hợp lệ). Hãy tạo/lấy key mới trên B.AI rồi dán vào đây.', 'error', 8000); return;
+    if (isFileProtocol()) {
+      notify('Đang mở bằng file:// nên không kiểm tra B.AI trực tiếp. Huyền sẽ dùng Gemini AI Studio; muốn kiểm tra DeepSeek hãy chạy qua http://localhost hoặc HTTPS.', 'warning', 7000);
+      return;
     }
-    const provider = normalizeHuyenAiProvider(document.getElementById('huyenPrimaryAiInput')?.value || HUYEN_PRIMARY_AI_PROVIDER);
-    if (!isBaiProvider(provider)) { notify('Hãy chọn DeepSeek V4 Flash hoặc Tencent Hy3 trước khi kiểm tra B.AI.', 'warning', 4500); return; }
-    const modelId = getBaiModelId(provider);
-    notify(`Đang kiểm tra ${huyenAiProviderLabel(provider)} → ${modelId} → chat/completions…`, 'info', 3200);
+    const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
+    if (!key) { notify('Nhập API key B.AI trước khi kiểm tra.', 'error'); return; }
+    notify('Đang kiểm tra B.AI → deepseek-v4-flash → chat/completions…', 'info', 3200);
     try {
-      const r = await diagnoseBaiConnection(key, provider);
-      notify(`B.AI kết nối thành công · ${modelId} · ${BAI_BASE_URL} · xác thực ${r.authMode === 'x-api-key' ? 'x-api-key' : 'Bearer'} · phản hồi OK`, 'success', 6500);
+      const r = await diagnoseBaiConnection(key);
+      notify(`B.AI kết nối thành công · ${BAI_MODEL_ID} · ${BAI_BASE_URL} · xác thực ${r.authMode === 'x-api-key' ? 'x-api-key' : 'Bearer'} · phản hồi OK`, 'success', 6500);
     } catch (e) {
       console.error('[B.AI TEST]', e);
       notify(`B.AI chưa kết nối được: ${baiFriendlyError(e)}`, 'error', 10000);
@@ -4457,12 +4382,12 @@ function App() {
                         <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('deep'); setAdvisorCustomer(c); }}
                           title="Phân tích sâu — đọc nhiều ngữ cảnh hơn và góp ý kỹ hơn, thời gian chờ lâu hơn"
                           className="btn huyen-advisor-entry-btn px-3 py-2 text-[10.5px] max-w-[250px]">
-                          <I.Sparkles width="13" height="13" /> Huyền phân tích sâu-cần thời gian trên 3 phút
+                          <I.Sparkles width="13" height="13" /> Huyền sẽ phân tích nhưng cần lâu thời gian nhé
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('fast'); setAdvisorCustomer(c); }}
                           title="Phân tích nhanh — ưu tiên trả kết quả sớm và các bước chốt quan trọng"
                           className="btn huyen-advisor-fast-btn px-3 py-2 text-[10.5px] max-w-[175px]">
-                          <I.Sparkles width="13" height="13" /> Huyền gởi ý nhanh
+                          <I.Sparkles width="13" height="13" /> Huyền phân tích nha
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); handleOpenFeedback(c); }}
                           className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px]">
@@ -4878,12 +4803,12 @@ function App() {
                             <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('deep'); setAdvisorCustomer(r); }}
                               title="Phân tích sâu — đọc nhiều ngữ cảnh hơn và góp ý kỹ hơn, thời gian chờ lâu hơn"
                               className="btn huyen-advisor-entry-btn px-3 py-2 text-[10.5px] max-w-[250px]">
-                              <I.Sparkles width="13" height="13" /> Huyền phân tích sâu-cần thời gian trên 3 phút
+                              <I.Sparkles width="13" height="13" /> Huyền sẽ phân tích nhưng cần lâu thời gian nhé
                             </button>
                             <button onClick={(e) => { e.stopPropagation(); setAdvisorMode('fast'); setAdvisorCustomer(r); }}
                               title="Phân tích nhanh — ưu tiên trả kết quả sớm và các bước chốt quan trọng"
                               className="btn huyen-advisor-fast-btn px-3 py-2 text-[10.5px] max-w-[175px]">
-                              <I.Sparkles width="13" height="13" /> Huyền gởi ý nhanh
+                              <I.Sparkles width="13" height="13" /> Huyền phân tích nha
                             </button>
                             <button onClick={(e) => { e.stopPropagation(); setQuickReportCustomer(r); }}
                               className="btn px-3 py-1.5 bg-violet-50 text-violet2 text-[11px] shrink-0">
@@ -4948,49 +4873,59 @@ function App() {
                   </div>
                 </section>
 
-                {/* AI CHÍNH CHO HUYỀN */}
+                {/* AI CHÍNH CHO HUYỀN — chỉ sửa đúng khu vực cài đặt AI */}
                 <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
                   <div className="flex items-center gap-3 mb-2">
                     <div className="w-10 h-10 rounded-xl bg-sky-50 text-brand flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
                     <div>
                       <h3 className="font-display text-[17px] font-extrabold text-ink">AI chính cho Huyền</h3>
-                      <p className="text-[11px] text-slate-400 font-semibold">Gemini 3.7 Flash · Kie.ai · DeepSeek V4 Flash · B.AI · Tencent Hy3 · B.AI</p>
+                      <p className="text-[11px] text-slate-400 font-semibold">DeepSeek V4 Flash/B.AI hoặc Gemini AI Studio · Gemini 3.7/Kie chỉ dành cho Turbo</p>
                     </div>
                   </div>
                   <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
-                    Chọn model dùng cho Huyền. DeepSeek V4 Flash và Tencent Hy3 dùng chung API key B.AI. Nếu model B.AI đang chọn lỗi, hệ thống thử model B.AI còn lại bằng cùng key rồi mới chuyển Gemini 3.7 Flash/Kie.ai.
+                    Chọn AI chính ở đây. Khi chạy bằng <b>http/https</b>, Huyền dùng AI chính trước rồi mới chuyển sang tuyến còn lại. Khi mở trực tiếp bằng <b>file://</b>, Huyền bỏ qua B.AI để tránh lỗi security-origin/CORS và dùng Gemini AI Studio ngay. <b>Gemini 3.7/Kie không chạy ở chế độ thường.</b>
                   </p>
                   <div className="space-y-4">
-                    <Field label="MODEL AI CHÍNH">
+                    <Field label="AI CHÍNH — CÓ THỂ CHỌN">
                       <select id="huyenPrimaryAiInput" className="fld" defaultValue={huyenPrimaryAi} key={`ai-${huyenPrimaryAi}`}>
-                        <option value={HUYEN_AI_PROVIDERS.GEMINI}>Gemini 3.7 Flash · Kie.ai</option>
                         <option value={HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH}>DeepSeek V4 Flash · B.AI</option>
-                        <option value={HUYEN_AI_PROVIDERS.TENCENT_HY3}>Tencent Hy3 · B.AI</option>
+                        <option value={HUYEN_AI_PROVIDERS.GEMINI}>Gemini AI Studio · 3 API key</option>
                       </select>
                     </Field>
-                    <Field label="API KEY B.AI — DÙNG CHUNG DEEPSEEK V4 FLASH / TENCENT HY3">
+
+                    <Field label="MODEL GEMINI AI STUDIO">
+                      <select id="geminiStudioModelInput" className="fld" defaultValue={geminiStudioModel} key={`studio-${geminiStudioModel}`}>
+                        {!GEMINI_STUDIO_MODEL_OPTIONS.includes(geminiStudioModel) && <option value={geminiStudioModel}>{geminiStudioModel} · đang lưu</option>}
+                        {GEMINI_STUDIO_MODEL_OPTIONS.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </Field>
+
+                    <Field label="API KEY B.AI — DEEPSEEK V4 FLASH">
                       <input id="baiApiKeyInput" type="password" defaultValue={baiApiKey || ''} key={`bai-${baiApiKey}`} placeholder="sk-..." className="fld font-mono text-[13px]" autoComplete="off" />
                     </Field>
+
                     <div className="rounded-xl bg-sky-50 border border-sky-200 px-3.5 py-3 text-[11.5px] text-sky-900 leading-relaxed">
-                      <b>Model ID:</b> <span className="font-mono">deepseek-v4-flash</span> / <span className="font-mono">hy3</span> · <b>Base URL:</b> <span className="font-mono">https://api.b.ai/v1</span> · <b>401:</b> key hết hạn/không hợp lệ, cần nhập key mới; không phải lỗi model.<br/>
-                      <b>Chat endpoint:</b> <span className="font-mono">https://api.b.ai/v1/chat/completions</span> · xác thực <b>Authorization: Bearer</b>.<br/>
-                      Kết nối OpenAI-compatible, tự đọc cả non-stream và stream SSE. <b>Tencent Hy3</b> hỗ trợ suy luận nhanh/sâu và context dài; cả Hy3 lẫn DeepSeek V4 Flash đều là <b>text-only</b>.
+                      <b>Chế độ thường:</b> AI chính đã chọn → tuyến còn lại. <b>Không dùng Kie.</b><br/>
+                      <b>Turbo:</b> Gemini 3.7 Flash/Kie chạy chính; nếu Turbo lỗi mới quay về tuyến thường.<br/>
+                      <b>Gemini Studio:</b> dùng lần lượt 3 API key ở khung bên dưới và model bạn chọn ở đây.
                     </div>
+
                     {typeof location !== 'undefined' && location.protocol === 'file:' && (
                       <div className="rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-3 text-[11.5px] text-amber-900 leading-relaxed">
-                        <b>Lưu ý:</b> ứng dụng đang mở bằng <span className="font-mono">file://</span>. Nếu B.AI báo lỗi mạng/CORS, đây là giới hạn gọi API trực tiếp từ trình duyệt; nút <b>Kiểm tra B.AI</b> sẽ báo rõ nguyên nhân.
+                        <b>Đang chạy file://:</b> Huyền sẽ <b>không gọi B.AI</b>. Đây là chủ động để tránh đứng chờ và lỗi unique security origin. Gemini AI Studio vẫn là tuyến phân tích thường trong chế độ này.
                       </div>
                     )}
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <button onClick={handleTestBai} className="btn w-full py-3.5 bg-white border border-sky-200 text-brand text-[12px] font-extrabold">
                         Kiểm tra B.AI
                       </button>
                       <button onClick={handleSaveHuyenAiConfig} className="btn w-full py-3.5 bg-brand text-white text-[12px] uppercase tracking-wider shadow-lift">
-                        <I.Save width="16" height="16" /> Lưu model + API key
+                        <I.Save width="16" height="16" /> Lưu AI chính + Model Studio
                       </button>
                     </div>
                     <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                      Đang chọn: <b>{huyenAiProviderLabel(huyenPrimaryAi)}</b>
+                      Đang chọn: <b>{huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : `Gemini AI Studio · ${geminiStudioModel}`}</b>
                       {baiApiKey ? ` · B.AI key ${maskBaiKey(baiApiKey)}` : ''}.
                     </p>
                   </div>
@@ -5353,7 +5288,7 @@ function Popups({
   const [advisorResult, setAdvisorResult] = useState(null);
   const [advisorError, setAdvisorError] = useState('');
 
-  /* Huyền Turbo chỉ áp dụng cho AI cố vấn xử lý khách hàng; quyền dùng do BGĐ kiểm soát trong Cài đặt. */
+  /* Huyền Turbo: Gemini 3.7/Kie chỉ chạy khi người dùng bật Turbo; chế độ thường không gọi Kie. */
   const turboPolicy = turboControl || { allowed: true, defaultOn: false, locked: false };
   const normalAiLabel = 'chế độ thường';
   const [huyenTurbo, setHuyenTurbo] = useState(() => {
@@ -5745,123 +5680,7 @@ function Popups({
               </div>
             )}
 
-            {directAdvisorResult && !directAdvisorBusy && directAdvisorResult?._huyenMeta?.analysisMode === 'fast' && (
-              <div className="huyen-result-body fade-in max-h-[70vh] overflow-y-auto pr-1 space-y-4">
-                <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-white border border-blue-200 p-4 sm:p-5">
-                  <div className="flex flex-wrap items-center gap-2 mb-3">
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-brand text-white px-3 py-1 text-[10.5px] font-extrabold uppercase tracking-wider">
-                      ⚡ Huyền phân tích nhanh
-                    </span>
-                    {directAdvisorResult.stage && <Badge cls="bg-white text-violet-700 border-violet-200">{huyenDisplayText(directAdvisorResult.stage)}</Badge>}
-                    {directAdvisorResult.priority && <Badge cls={directAdvisorResult.priority === 'Cao' ? 'bg-rose-50 text-rose-700 border-rose-200' : directAdvisorResult.priority === 'Thấp' ? 'bg-slate-50 text-slate-600 border-slate-200' : 'bg-amber-50 text-amber-700 border-amber-200'}>Ưu tiên {huyenDisplayText(directAdvisorResult.priority)}</Badge>}
-                  </div>
-                  <p className="text-[14px] sm:text-[15px] font-bold text-ink leading-[1.75] whitespace-pre-line">
-                    {huyenDisplayText(directAdvisorResult.situationSummary)}
-                  </p>
-                </div>
-
-                <div className="grid sm:grid-cols-2 gap-3">
-                  {directAdvisorResult.mainBarrier && (
-                    <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4">
-                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber-700 mb-2">01 · Rào cản chính</p>
-                      <p className="text-[13px] text-ink leading-[1.75]">{huyenDisplayText(directAdvisorResult.mainBarrier)}</p>
-                    </div>
-                  )}
-                  {directAdvisorResult.customerMindset && (
-                    <div className="rounded-2xl bg-sky-50 border border-sky-200 p-4">
-                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-2">02 · Tâm thế khách hàng</p>
-                      <p className="text-[13px] text-ink leading-[1.75]">{huyenDisplayText(directAdvisorResult.customerMindset)}</p>
-                    </div>
-                  )}
-                </div>
-
-                {Array.isArray(directAdvisorResult.recommendedActions) && directAdvisorResult.recommendedActions.length > 0 && (
-                  <div className="rounded-2xl bg-white border border-line p-4 sm:p-5">
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className="w-8 h-8 rounded-xl bg-violet-50 text-violet2 flex items-center justify-center font-extrabold">3</span>
-                      <div>
-                        <p className="text-[13px] font-extrabold text-ink">Việc nên làm ngay</p>
-                        <p className="text-[10.8px] text-slate-400">Theo thứ tự ưu tiên để tiến gần chốt</p>
-                      </div>
-                    </div>
-                    <div className="space-y-3">
-                      {directAdvisorResult.recommendedActions.slice(0,3).map((a, idx) => (
-                        <div key={idx} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
-                          <div className="flex gap-3">
-                            <span className="w-7 h-7 shrink-0 rounded-full bg-ink text-white flex items-center justify-center text-[11px] font-extrabold">{idx+1}</span>
-                            <div className="min-w-0">
-                              <p className="text-[13px] font-extrabold text-ink leading-[1.6]">{huyenDisplayText(a.action)}</p>
-                              {a.reason && <p className="text-[12px] text-slate-600 mt-1.5 leading-[1.7]"><b>Vì sao:</b> {huyenDisplayText(a.reason)}</p>}
-                              {a.goal && <p className="text-[12px] text-slate-600 mt-1 leading-[1.7]"><b>Cần đạt:</b> {huyenDisplayText(a.goal)}</p>}
-                              {a.suggestedScript && <div className="mt-2.5 rounded-lg bg-white border border-blue-100 px-3 py-2.5 text-[12px] text-brand leading-[1.7]"><b>Có thể nói:</b> “{huyenDisplayText(a.suggestedScript)}”</div>}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid lg:grid-cols-2 gap-3">
-                  {Array.isArray(directAdvisorResult.questionsToAsk) && directAdvisorResult.questionsToAsk.length > 0 && (
-                    <div className="rounded-2xl bg-cyan-50/70 border border-cyan-200 p-4">
-                      <p className="text-[11px] font-extrabold uppercase tracking-wider text-brand mb-3">Câu hỏi khóa cần hỏi</p>
-                      <div className="space-y-2.5">
-                        {directAdvisorResult.questionsToAsk.slice(0,3).map((x,i)=>(
-                          <div key={i} className="flex gap-2.5">
-                            <span className="w-6 h-6 shrink-0 rounded-full bg-white border border-cyan-200 text-brand flex items-center justify-center text-[10.5px] font-extrabold">{i+1}</span>
-                            <p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(x)}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {directAdvisorResult.closingPlan && (
-                    <div className="rounded-2xl bg-emerald-50/80 border border-emerald-200 p-4">
-                      <p className="text-[11px] font-extrabold uppercase tracking-wider text-jade mb-3">Mục tiêu chốt lần tới</p>
-                      {directAdvisorResult.closingPlan.objective && <p className="text-[12.8px] font-bold text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.objective)}</p>}
-                      {directAdvisorResult.closingPlan.minimumCommitment && <div className="mt-2.5 pt-2.5 border-t border-emerald-200/70"><p className="text-[10.5px] font-extrabold uppercase text-emerald-700 mb-1">Cam kết nhỏ nhất</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.minimumCommitment)}</p></div>}
-                      {directAdvisorResult.closingPlan.fallback && <div className="mt-2.5"><p className="text-[10.5px] font-extrabold uppercase text-slate-500 mb-1">Nếu chưa đồng ý</p><p className="text-[12px] text-slate-600 leading-[1.7]">{huyenDisplayText(directAdvisorResult.closingPlan.fallback)}</p></div>}
-                    </div>
-                  )}
-                </div>
-
-                {directAdvisorResult.nextConversationPlan && (
-                  <div className="rounded-2xl bg-indigo-50/70 border border-indigo-200 p-4">
-                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 mb-3">Kịch bản trao đổi ngắn</p>
-                    <div className="grid sm:grid-cols-3 gap-3">
-                      {directAdvisorResult.nextConversationPlan.opening && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">MỞ ĐẦU</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.opening)}</p></div>}
-                      {directAdvisorResult.nextConversationPlan.discovery && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">HỎI TRỌNG TÂM</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.discovery)}</p></div>}
-                      {directAdvisorResult.nextConversationPlan.close && <div><p className="text-[10.5px] font-extrabold text-slate-500 mb-1">XIN CAM KẾT</p><p className="text-[12.3px] text-ink leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextConversationPlan.close)}</p></div>}
-                    </div>
-                  </div>
-                )}
-
-                {directAdvisorResult.nextFollowUp && (
-                  <div className="rounded-xl bg-white border border-blue-100 px-4 py-3 flex gap-3 items-start">
-                    <span className="text-brand mt-0.5">◷</span>
-                    <div>
-                      <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand">Theo dõi tiếp</p>
-                      <p className="text-[12.5px] text-ink mt-1 leading-[1.7]">{huyenDisplayText(directAdvisorResult.nextFollowUp)}</p>
-                    </div>
-                  </div>
-                )}
-
-                {directAdvisorResult.finalAdvice && (
-                  <div className="rounded-2xl bg-ink text-white p-4 sm:p-5 shadow-soft">
-                    <p className="text-[10.5px] font-extrabold uppercase tracking-[.12em] text-blue-200 mb-2">Kết luận của Huyền</p>
-                    <p className="text-[13.5px] font-semibold leading-[1.8] whitespace-pre-line">{huyenDisplayText(directAdvisorResult.finalAdvice)}</p>
-                  </div>
-                )}
-
-                <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-blue-50 text-brand border border-blue-100 text-[11.5px]">
-                  <I.Refresh width="14" height="14" /> Phân tích nhanh lại dữ liệu mới nhất
-                </button>
-              </div>
-            )}
-
-            {directAdvisorResult && !directAdvisorBusy && directAdvisorResult?._huyenMeta?.analysisMode !== 'fast' && (
+            {directAdvisorResult && !directAdvisorBusy && (
               <div className="huyen-result-body space-y-3 fade-in max-h-[70vh] overflow-y-auto pr-1">
                 <div className="rounded-2xl bg-white border border-amber-100 p-4">
                   <div className="flex flex-wrap gap-2 mb-2">
@@ -6192,46 +6011,7 @@ function Popups({
 
                 {advisorError && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-[11.5px] font-semibold text-crimson">{advisorError}</div>}
 
-                {advisorResult && advisorResult?._huyenMeta?.analysisMode === 'fast' && (
-                  <div className="huyen-result-body mt-4 fade-in space-y-4">
-                    <div className="rounded-2xl bg-blue-50/70 border border-blue-200 p-4">
-                      <div className="flex flex-wrap gap-2 mb-2">
-                        <span className="rounded-full bg-brand text-white px-3 py-1 text-[10.5px] font-extrabold uppercase tracking-wider">⚡ Phân tích nhanh</span>
-                        {advisorResult.stage && <Badge cls="bg-white text-violet-700 border-violet-200">{huyenDisplayText(advisorResult.stage)}</Badge>}
-                        {advisorResult.priority && <Badge cls="bg-white text-amber-700 border-amber-200">Ưu tiên {huyenDisplayText(advisorResult.priority)}</Badge>}
-                      </div>
-                      <p className="text-[14px] font-bold text-ink leading-[1.75]">{huyenDisplayText(advisorResult.situationSummary)}</p>
-                    </div>
-
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      {advisorResult.mainBarrier && <div className="rounded-xl bg-amber-50 border border-amber-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-amber-700 mb-1.5">Rào cản chính</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(advisorResult.mainBarrier)}</p></div>}
-                      {advisorResult.customerMindset && <div className="rounded-xl bg-sky-50 border border-sky-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-brand mb-1.5">Tâm thế khách hàng</p><p className="text-[12.5px] text-ink leading-[1.7]">{huyenDisplayText(advisorResult.customerMindset)}</p></div>}
-                    </div>
-
-                    {Array.isArray(advisorResult.recommendedActions) && advisorResult.recommendedActions.length > 0 && (
-                      <div className="rounded-2xl bg-white border border-line p-4">
-                        <p className="text-[11px] font-extrabold uppercase tracking-wider text-violet2 mb-3">3 việc nên làm ngay</p>
-                        <div className="space-y-3">
-                          {advisorResult.recommendedActions.slice(0,3).map((a,idx)=>(
-                            <div key={idx} className="flex gap-3 rounded-xl bg-slate-50 border border-slate-200 p-3">
-                              <span className="w-7 h-7 rounded-full bg-ink text-white flex items-center justify-center shrink-0 text-[11px] font-extrabold">{idx+1}</span>
-                              <div><p className="text-[12.8px] font-extrabold text-ink leading-[1.6]">{huyenDisplayText(a.action)}</p>{a.reason && <p className="text-[11.8px] text-slate-600 mt-1 leading-[1.7]"><b>Vì sao:</b> {huyenDisplayText(a.reason)}</p>}{a.suggestedScript && <p className="text-[11.8px] text-brand mt-1.5 leading-[1.7]"><b>Có thể nói:</b> “{huyenDisplayText(a.suggestedScript)}”</p>}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      {Array.isArray(advisorResult.questionsToAsk) && advisorResult.questionsToAsk.length > 0 && <div className="rounded-xl bg-cyan-50 border border-cyan-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-brand mb-2">Câu hỏi khóa</p>{advisorResult.questionsToAsk.slice(0,3).map((x,i)=><p key={i} className="text-[12px] text-ink leading-[1.7] mb-1.5 last:mb-0">{i+1}. {huyenDisplayText(x)}</p>)}</div>}
-                      {advisorResult.closingPlan && <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5"><p className="text-[10.5px] font-extrabold uppercase text-jade mb-2">Mục tiêu chốt</p>{advisorResult.closingPlan.objective && <p className="text-[12.5px] font-bold text-ink leading-[1.7]">{huyenDisplayText(advisorResult.closingPlan.objective)}</p>}{advisorResult.closingPlan.minimumCommitment && <p className="text-[12px] text-slate-600 mt-2 leading-[1.7]"><b>Cam kết nhỏ nhất:</b> {huyenDisplayText(advisorResult.closingPlan.minimumCommitment)}</p>}</div>}
-                    </div>
-
-                    {advisorResult.finalAdvice && <div className="rounded-2xl bg-ink text-white p-4"><p className="text-[10.5px] font-extrabold uppercase text-blue-200 mb-1.5">Kết luận của Huyền</p><p className="text-[13px] font-semibold leading-[1.8]">{huyenDisplayText(advisorResult.finalAdvice)}</p></div>}
-                  </div>
-                )}
-
-                {advisorResult && advisorResult?._huyenMeta?.analysisMode !== 'fast' && (
+                {advisorResult && (
                   <div className="huyen-result-body mt-4 space-y-3 fade-in">
                     <div className="rounded-xl bg-white border border-violet-100 p-3.5">
                       <div className="flex flex-wrap gap-2 mb-2">
