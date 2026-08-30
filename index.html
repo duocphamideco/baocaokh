@@ -175,7 +175,7 @@ tailwind.config = {
 
 <script type="text/jsx-source" id="app-source">
 /* ============================================================================
-   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN V10.11 GEMINI INTERACTIONS FIX
+   IDECO — BÁO CÁO GIAO DỊCH KHÁCH HÀNG  (single-file HTML) · HUYỀN V10.14 GLM-5.3-FLASH B.AI
    ============================================================================ */
 
 /* ####################################################################
@@ -515,12 +515,14 @@ function huyenAnalysisFingerprint(customer, mode) {
 const HUYEN_AI_PROVIDERS = {
   GEMINI: 'gemini',
   DEEPSEEK_V4_FLASH: 'deepseek-v4-flash',
-  QWEN38_FLASH: 'qwen3.8-flash'
+  QWEN38_FLASH: 'qwen3.8-flash',
+  GLM53_FLASH: 'glm-5.3-flash'
 };
 const BAI_BASE_URL = 'https://api.b.ai/v1';
 const BAI_ENDPOINT = `${BAI_BASE_URL}/chat/completions`;
 const BAI_MODEL_ID = 'deepseek-v4-flash';
 const QWEN_BAI_MODEL_ID = 'qwen3.8-flash';
+const GLM_BAI_MODEL_ID = 'glm-5.3-flash';
 /* Key B.AI do BGĐ cung cấp. Có thể thay trong Cài đặt và lưu Firebase. */
 const BAI_DEFAULT_API_KEY = 'sk-161ijj0ect4cjsdnxgo966jja0p5uqm1';
 const QWEN_BAI_DEFAULT_API_KEY = 'sk-1ma6pvtnt4zd9pyuth1mhthz89t1an0x';
@@ -533,6 +535,7 @@ let HUYEN_PRIMARY_AI_PROVIDER = HUYEN_AI_PROVIDERS.GEMINI;
 const normalizeHuyenAiProvider = (v) => {
   if (v === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH;
   if (v === HUYEN_AI_PROVIDERS.QWEN38_FLASH) return HUYEN_AI_PROVIDERS.QWEN38_FLASH;
+  if (v === HUYEN_AI_PROVIDERS.GLM53_FLASH) return HUYEN_AI_PROVIDERS.GLM53_FLASH;
   return HUYEN_AI_PROVIDERS.GEMINI;
 };
 const setHuyenPrimaryAiProvider = (v) => { HUYEN_PRIMARY_AI_PROVIDER = normalizeHuyenAiProvider(v); };
@@ -703,7 +706,7 @@ function parseBaiRawResponse(raw, { allowReasoning = false } = {}) {
   }
 }
 
-async function callBaiChatLean(modelId, apiKey, prompt, { json = true, temperature = 0.10, maxTokens = 4200, timeoutMs = 42000 } = {}) {
+async function callBaiChatLean(modelId, apiKey, prompt, { json = true, temperature = 0.10, maxTokens = 4200, timeoutMs = 42000, reasoningEffort = null } = {}) {
   const key = String(apiKey || '').trim();
   if (!key) throw new Error('NO_BAI_KEY');
   const bodyBase = {
@@ -711,7 +714,8 @@ async function callBaiChatLean(modelId, apiKey, prompt, { json = true, temperatu
     messages: [{ role: 'user', content: String(prompt || '') }],
     stream: false,
     temperature,
-    max_tokens: Math.max(Number(maxTokens) || 0, json ? 768 : 128)
+    max_tokens: Math.max(Number(maxTokens) || 0, json ? 768 : 128),
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
   };
   const attempt = async (authMode, useFormat) => {
     const body = { ...bodyBase, ...(json && useFormat ? { response_format: { type: 'json_object' } } : {}) };
@@ -750,6 +754,10 @@ async function callDeepSeekBai(prompt, { json = true, temperature = 0.10, maxTok
 }
 async function callQwenBai(prompt, { json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
   return callBaiChatLean(QWEN_BAI_MODEL_ID, String(apiKey || QWEN_BAI_API_KEY || '').trim(), prompt, { json, temperature, maxTokens, timeoutMs });
+}
+async function callGlmBai(prompt, { json = true, temperature = 0.10, maxTokens = 4200, apiKey = null, timeoutMs = 42000 } = {}) {
+  /* GLM-5.3-Flash luôn bật reasoning; low ưu tiên tốc độ cho tác vụ báo cáo giao dịch. */
+  return callBaiChatLean(GLM_BAI_MODEL_ID, String(apiKey || BAI_API_KEY || '').trim(), prompt, { json, temperature, maxTokens, timeoutMs, reasoningEffort: 'low' });
 }
 
 async function diagnoseBaiConnection(apiKey = null) {
@@ -793,6 +801,15 @@ async function diagnoseQwenBaiConnection(apiKey = null) {
   return { ok: true, text, model: QWEN_BAI_MODEL_ID };
 }
 
+async function diagnoseGlmBaiConnection(apiKey = null) {
+  const key = String(apiKey || BAI_API_KEY || '').trim();
+  if (!key) throw new Error('NO_BAI_KEY');
+  const text = await callGlmBai('Trả lời ngắn gọn đúng một từ: OK', {
+    json: false, temperature: 0, maxTokens: 2048, apiKey: key, timeoutMs: 20000
+  });
+  return { ok: true, text, model: GLM_BAI_MODEL_ID };
+}
+
 /* Tuyến AI Huyền — bản ổn định, không dùng Kie ngoài Turbo.
    - file://: KHÔNG gọi B.AI; dùng Gemini AI Studio để tránh CORS/security-origin.
    - http/https: theo AI chính BGĐ chọn; lỗi mới chuyển sang tuyến còn lại.
@@ -807,10 +824,12 @@ async function callHuyenPrimaryAI(prompt, { json = true, temperature = 0.10, max
   const studio = () => callGemini(prompt,{ model:studioModel, json, temperature, maxTokens, timeoutMs:studioTimeout });
   const deepseek = () => callDeepSeekBai(prompt,{ json, temperature, maxTokens, timeoutMs:baiTimeout });
   const qwen = () => callQwenBai(prompt,{ json, temperature, maxTokens, timeoutMs:baiTimeout });
-  const run = async steps => { let last=null; for (const fn of steps) { try { return await fn(); } catch(e) { last=e; console.warn('[HUYEN V10.13] AI thường lỗi -> chuyển dự phòng:', e); } } throw last || new Error('HUYEN_ALL_STANDARD_AI_FAILED'); };
-  if (provider === HUYEN_AI_PROVIDERS.QWEN38_FLASH) return run(deep ? [qwen,studio,deepseek] : [qwen,studio]);
-  if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return run(deep ? [deepseek,studio,qwen] : [deepseek,studio]);
-  return run(deep ? [studio,qwen,deepseek] : [studio,qwen]);
+  const glm = () => callGlmBai(prompt,{ json, temperature, maxTokens, timeoutMs:baiTimeout });
+  const run = async steps => { let last=null; for (const fn of steps) { try { return await fn(); } catch(e) { last=e; console.warn('[HUYEN V10.14] AI thường lỗi -> chuyển dự phòng:', e); } } throw last || new Error('HUYEN_ALL_STANDARD_AI_FAILED'); };
+  if (provider === HUYEN_AI_PROVIDERS.GLM53_FLASH) return run(deep ? [glm,studio,qwen,deepseek] : [glm,studio,qwen]);
+  if (provider === HUYEN_AI_PROVIDERS.QWEN38_FLASH) return run(deep ? [qwen,studio,glm,deepseek] : [qwen,studio,glm]);
+  if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH) return run(deep ? [deepseek,studio,glm,qwen] : [deepseek,studio,glm]);
+  return run(deep ? [studio,qwen,glm,deepseek] : [studio,qwen,glm]);
 }
 
 /* V9.8 — chống đứt giữa chừng: chỉ tự nối lại 1 lần với lỗi tạm thời.
@@ -2123,7 +2142,7 @@ function App() {
     catch (e) { return []; }
   });
   const [backupKeys, setBackupKeysState] = useState(['','','']);
-  /* AI chính của Huyền: Gemini AI Studio, DeepSeek V4 Flash/B.AI hoặc Qwen3.8-Flash/B.AI */
+  /* AI chính của Huyền: Gemini AI Studio, DeepSeek V4 Flash/B.AI, Qwen3.8-Flash/B.AI hoặc GLM-5.3-Flash/B.AI */
   const [huyenPrimaryAi, setHuyenPrimaryAi] = useState(HUYEN_AI_PROVIDERS.GEMINI);
   const [geminiStudioModel, setGeminiStudioModelState] = useState(GEMINI_STUDIO_DEFAULT_MODEL);
   const [baiApiKey, setBaiApiKeyState] = useState(BAI_DEFAULT_API_KEY);
@@ -2776,8 +2795,8 @@ function App() {
     const studioModel = normalizeGeminiStudioModel(document.getElementById('geminiStudioModelInput')?.value || geminiStudioModel || GEMINI_STUDIO_DEFAULT_MODEL);
     const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
     const qwenKey = String(document.getElementById('qwenBaiApiKeyInput')?.value || '').trim();
-    if (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH && !key) {
-      notify('Bạn chưa nhập API key B.AI cho DeepSeek V4 Flash.', 'error', 4500); return;
+    if ((provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH || provider === HUYEN_AI_PROVIDERS.GLM53_FLASH) && !key) {
+      notify('Bạn chưa nhập API key B.AI cho DeepSeek/GLM.', 'error', 4500); return;
     }
     if (provider === HUYEN_AI_PROVIDERS.QWEN38_FLASH && !qwenKey) {
       notify('Bạn chưa nhập API key B.AI cho Qwen3.8-Flash.', 'error', 4500); return;
@@ -2788,7 +2807,7 @@ function App() {
     if (qwenKey && !/^sk-[A-Za-z0-9_-]{12,}$/.test(qwenKey)) {
       notify('API key Qwen/B.AI chưa đúng định dạng thông thường sk-…', 'error', 4500); return;
     }
-    const payload = { provider, geminiStudioModel: studioModel, baiApiKey: key, qwenBaiApiKey: qwenKey, model: BAI_MODEL_ID, qwenModel: QWEN_BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
+    const payload = { provider, geminiStudioModel: studioModel, baiApiKey: key, qwenBaiApiKey: qwenKey, model: BAI_MODEL_ID, qwenModel: QWEN_BAI_MODEL_ID, glmModel: GLM_BAI_MODEL_ID, baseUrl: BAI_BASE_URL, updatedAt: Date.now() };
     const ok = await dbSet('settings/huyenAiConfig', payload);
     if (!ok) { notify('Không lưu được lựa chọn AI Huyền lên Firebase.', 'error'); return; }
     setHuyenPrimaryAi(provider); setHuyenPrimaryAiProvider(provider);
@@ -2798,7 +2817,9 @@ function App() {
     HUYEN_ANALYSIS_CACHE.clear();
     const providerLabel = provider === HUYEN_AI_PROVIDERS.QWEN38_FLASH
       ? 'Qwen3.8-Flash · B.AI'
-      : (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : `Gemini AI Studio · ${studioModel}`);
+      : (provider === HUYEN_AI_PROVIDERS.GLM53_FLASH
+          ? 'GLM-5.3-Flash · B.AI'
+          : (provider === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : `Gemini AI Studio · ${studioModel}`));
     notify('Đã lưu lựa chọn AI chính. Huyền sẽ ưu tiên đúng lựa chọn này và chỉ chuyển dự phòng khi lỗi/quá thời gian.', 'success', 5200);
   };
 
@@ -2828,6 +2849,21 @@ function App() {
     } catch (e) {
       console.error('[QWEN B.AI TEST]', e);
       notify(`Qwen3.8-Flash/B.AI chưa kết nối được: ${baiFriendlyError(e)}`, 'error', 10000);
+    }
+  };
+
+
+  const handleTestGlmBai = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const key = String(document.getElementById('baiApiKeyInput')?.value || '').trim();
+    if (!key) { notify('Nhập API key B.AI trước khi kiểm tra GLM.', 'error'); return; }
+    notify('Đang kiểm tra B.AI → glm-5.3-flash → reasoning low…', 'info', 3200);
+    try {
+      const r = await diagnoseGlmBaiConnection(key);
+      notify(`GLM-5.3-Flash/B.AI kết nối thành công · phản hồi ${String(r.text || 'OK').slice(0,40)}`, 'success', 6500);
+    } catch (e) {
+      console.error('[GLM B.AI TEST]', e);
+      notify(`GLM-5.3-Flash/B.AI chưa kết nối được: ${baiFriendlyError(e)}`, 'error', 10000);
     }
   };
 
@@ -4951,7 +4987,7 @@ function App() {
                     <div className="w-10 h-10 rounded-xl bg-sky-50 text-brand flex items-center justify-center"><I.Sparkles width="18" height="18" /></div>
                     <div>
                       <h3 className="font-display text-[17px] font-extrabold text-ink">AI chính cho Huyền</h3>
-                      <p className="text-[11px] text-slate-400 font-semibold">DeepSeek V4 Flash/B.AI, Qwen3.8-Flash/B.AI hoặc Gemini AI Studio · Gemini 3.7/Kie chỉ dành cho Turbo</p>
+                      <p className="text-[11px] text-slate-400 font-semibold">DeepSeek V4 Flash/B.AI, Qwen3.8-Flash/B.AI, GLM-5.3-Flash/B.AI hoặc Gemini AI Studio · Gemini 3.7/Kie chỉ dành cho Turbo</p>
                     </div>
                   </div>
                   <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
@@ -4962,6 +4998,7 @@ function App() {
                       <select id="huyenPrimaryAiInput" className="fld" defaultValue={huyenPrimaryAi} key={`ai-${huyenPrimaryAi}`}>
                         <option value={HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH}>DeepSeek V4 Flash · B.AI</option>
                         <option value={HUYEN_AI_PROVIDERS.QWEN38_FLASH}>Qwen3.8-Flash · B.AI</option>
+                        <option value={HUYEN_AI_PROVIDERS.GLM53_FLASH}>GLM-5.3-Flash · B.AI · reasoning low, ưu tiên nhanh</option>
                         <option value={HUYEN_AI_PROVIDERS.GEMINI}>Gemini AI Studio · 3 API key</option>
                       </select>
                     </Field>
@@ -4973,7 +5010,7 @@ function App() {
                       </select>
                     </Field>
 
-                    <Field label="API KEY B.AI — DEEPSEEK V4 FLASH">
+                    <Field label="API KEY B.AI — DEEPSEEK V4 FLASH + GLM-5.3-FLASH">
                       <input id="baiApiKeyInput" type="password" defaultValue={baiApiKey || ''} key={`bai-${baiApiKey}`} placeholder="sk-..." className="fld font-mono text-[13px]" autoComplete="off" />
                     </Field>
 
@@ -4982,7 +5019,7 @@ function App() {
                     </Field>
 
                     <div className="rounded-xl bg-sky-50 border border-sky-200 px-3.5 py-3 text-[11.5px] text-sky-900 leading-relaxed">
-                      <b>Chế độ thường:</b> AI chính đã chọn → các tuyến dự phòng còn lại. <b>Không dùng Kie.</b><br/>
+                      <b>Chế độ thường:</b> AI chính đã chọn → các tuyến dự phòng còn lại. GLM-5.3-Flash dùng <b>reasoning low</b> để ưu tiên phản hồi nhanh. <b>Không dùng Kie.</b><br/>
                       <b>Turbo:</b> Gemini 3.7 Flash/Kie chạy chính; nếu Turbo lỗi mới quay về tuyến thường.<br/>
                       <b>Gemini Studio:</b> dùng lần lượt 3 API key ở khung bên dưới và model bạn chọn ở đây.
                     </div>
@@ -4993,21 +5030,24 @@ function App() {
                       </div>
                     )}
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                       <button onClick={handleTestBai} className="btn w-full py-3.5 bg-white border border-sky-200 text-brand text-[12px] font-extrabold">
                         Test DeepSeek
                       </button>
                       <button onClick={handleTestQwenBai} className="btn w-full py-3.5 bg-white border border-sky-200 text-brand text-[12px] font-extrabold">
                         Test Qwen3.8
                       </button>
+                      <button onClick={handleTestGlmBai} className="btn w-full py-3.5 bg-white border border-sky-200 text-brand text-[12px] font-extrabold">
+                        Test GLM-5.3
+                      </button>
                       <button onClick={handleSaveHuyenAiConfig} className="btn w-full py-3.5 bg-brand text-white text-[12px] uppercase tracking-wider shadow-lift">
                         <I.Save width="16" height="16" /> Lưu cấu hình AI
                       </button>
                     </div>
                     <p className="text-[10.5px] text-slate-400 leading-relaxed">
-                      Đang chọn: <b>{huyenPrimaryAi === HUYEN_AI_PROVIDERS.QWEN38_FLASH ? 'Qwen3.8-Flash · B.AI' : (huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : `Gemini AI Studio · ${geminiStudioModel}`)}</b>
+                      Đang chọn: <b>{huyenPrimaryAi === HUYEN_AI_PROVIDERS.QWEN38_FLASH ? 'Qwen3.8-Flash · B.AI' : (huyenPrimaryAi === HUYEN_AI_PROVIDERS.GLM53_FLASH ? 'GLM-5.3-Flash · B.AI' : (huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH ? 'DeepSeek V4 Flash · B.AI' : `Gemini AI Studio · ${geminiStudioModel}`))}</b>
                       {huyenPrimaryAi === HUYEN_AI_PROVIDERS.QWEN38_FLASH && qwenBaiApiKey ? ` · Qwen key ${maskBaiKey(qwenBaiApiKey)}` : ''}
-                      {huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH && baiApiKey ? ` · DeepSeek key ${maskBaiKey(baiApiKey)}` : ''}.
+                      {(huyenPrimaryAi === HUYEN_AI_PROVIDERS.DEEPSEEK_V4_FLASH || huyenPrimaryAi === HUYEN_AI_PROVIDERS.GLM53_FLASH) && baiApiKey ? ` · B.AI key ${maskBaiKey(baiApiKey)}` : ''}.
                     </p>
                   </div>
                 </section>
