@@ -2419,9 +2419,24 @@ async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
     throw new Error('Live chưa được Firebase xác nhận. Vui lòng kiểm tra mạng rồi bấm Live lại.');
   }
 
-  /* Nếu widget nhận Live đang nằm cùng trang, đánh thức nó ngay; người vào sau vẫn được poll mỗi 10 giây. */
-  try { window.dispatchEvent(new CustomEvent('ideco:huyen-live-published', { detail: payload })); } catch (e) {}
-  return payload;
+  /* V4 BROADCAST: ghi thêm 1 bản CURRENT chung để mọi website nhúng nhận được
+     mà KHÔNG cần đoán tên nhân viên đang mở trang. Hộp thư riêng phía trên vẫn giữ nguyên. */
+  const broadcastPayload = { ...payload, broadcastId: id, publishedAt: Date.now(), source: 'HUYEN_ANALYSIS_LIVE_V4_BROADCAST' };
+  const broadcastPath = 'huyenLiveBroadcast/current';
+  const broadcastOk = await dbSet(broadcastPath, broadcastPayload);
+  if (!broadcastOk) throw new Error('Đã lưu Live cho nhân viên nhưng chưa phát được kênh Live chung. Vui lòng bấm Live lại.');
+  let broadcastVerified = await dbGet(broadcastPath);
+  if (!broadcastVerified || String(broadcastVerified.id || broadcastVerified.broadcastId || '') !== id) {
+    await new Promise(r => setTimeout(r, 450));
+    broadcastVerified = await dbGet(broadcastPath);
+  }
+  if (!broadcastVerified || String(broadcastVerified.id || broadcastVerified.broadcastId || '') !== id) {
+    throw new Error('Kênh Live chung chưa được Firebase xác nhận. Vui lòng kiểm tra mạng rồi bấm Live lại.');
+  }
+
+  /* Widget cùng trang nhận ngay; website khác nhận qua Firebase/poll tối đa khoảng 10 giây. */
+  try { window.dispatchEvent(new CustomEvent('ideco:huyen-live-published', { detail: broadcastPayload })); } catch (e) {}
+  return broadcastPayload;
 }
 
 /* ================================ APP ==================================== */
@@ -5822,7 +5837,7 @@ function Popups({
     setLivePublishing(true);
     try {
       const sent = await publishHuyenLiveAnalysis(customer, result, mode);
-      notify && notify(`Đã gửi Live cho ${sent.staffName}. Nhân viên sẽ nhận popup sau tối đa khoảng 10 giây nếu chưa bấm Đã hiểu.`, 'success', 6500);
+      notify && notify(`Đã phát Live cho ${sent.staffName}. Website Tổng sẽ nhận ngay hoặc sau tối đa khoảng 10 giây; người vào sau vẫn nhận nếu máy đó chưa bấm Đã hiểu.`, 'success', 6500);
     } catch (e) {
       notify && notify(String(e?.message || e || 'Chưa gửi được Live.'), 'error', 6500);
     } finally { setLivePublishing(false); }
