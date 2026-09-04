@@ -2356,6 +2356,40 @@ function huyenLiveStaffKey(name) {
   const slug = base.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 28) || 'nhan-vien';
   return `${slug}_${(h >>> 0).toString(36)}`;
 }
+function huyenLiveShortHash(value) {
+  const s = String(value || '');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+function huyenLiveCaseKey(staffName, customerId, customerName) {
+  const staff = huyenLiveFoldStaffName(staffName);
+  const cid = String(customerId || '').trim();
+  const cname = huyenLiveFoldStaffName(customerName || '');
+  const raw = `${staff}|${cid ? `id:${cid}` : `name:${cname}`}`;
+  return `case_${huyenLiveShortHash(raw)}_${huyenLiveShortHash(staff).slice(0,5)}_${huyenLiveShortHash(cid || cname).slice(0,5)}`;
+}
+const HUYEN_LIVE_CASE_ACK_STORAGE = 'ideco_huyen_live_case_ack_v5';
+function huyenLiveCaseAckMap() {
+  try {
+    const x = JSON.parse(localStorage.getItem(HUYEN_LIVE_CASE_ACK_STORAGE) || '{}');
+    return x && typeof x === 'object' && !Array.isArray(x) ? x : {};
+  } catch (e) { return {}; }
+}
+function huyenLiveCaseAckAt(caseKey) {
+  if (!caseKey) return 0;
+  return Number(huyenLiveCaseAckMap()[caseKey] || 0);
+}
+function huyenLiveMarkCaseAck(caseKey, at = Date.now()) {
+  if (!caseKey) return;
+  try {
+    const x = huyenLiveCaseAckMap();
+    x[caseKey] = Math.max(Number(x[caseKey] || 0), Number(at || Date.now()));
+    const keys = Object.keys(x).sort((a,b) => Number(x[b] || 0) - Number(x[a] || 0)).slice(0,120);
+    const keep = {}; keys.forEach(k => { keep[k] = x[k]; });
+    localStorage.setItem(HUYEN_LIVE_CASE_ACK_STORAGE, JSON.stringify(keep));
+  } catch (e) {}
+}
 
 function formatHuyenAdvisorForLive(customer, r, mode = 'fast') {
   if (!r) return '';
@@ -2397,14 +2431,15 @@ async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
   if (!staffName) throw new Error('Hồ sơ chưa có Nhân viên phụ trách nên chưa thể gửi Live.');
   const id = `live_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
   const staffKey = huyenLiveStaffKey(staffName);
+  const caseKey = huyenLiveCaseKey(staffName, customer?.id, customer?.name);
   const path = `huyenLive/${staffKey}/${id}`;
   const payload = {
-    id, staffName, staffKey,
+    id, staffName, staffKey, caseKey,
     customerId: String(customer?.id || ''), customerName: String(customer?.name || ''),
     mode: mode === 'deep' ? 'deep' : 'fast',
     title: `Bạn ${staffName}, Huyền được phân công BGĐ gởi bạn phần nội dung gợi ý xử lý về khách hàng mới mà bạn đang giao dịch, bạn xem lại và tìm cách chốt:`,
     content: formatHuyenAdvisorForLive(customer, result, mode),
-    createdAt: Date.now(), acknowledgedAt: null, acknowledgedBy: '', source: 'HUYEN_ANALYSIS_LIVE_V2'
+    createdAt: Date.now(), acknowledgedAt: null, acknowledgedBy: '', source: 'HUYEN_ANALYSIS_LIVE_V5_CASE_DEDUPE'
   };
   const ok = await dbSet(path, payload);
   if (!ok) throw new Error('Chưa gửi được Live lên Firebase. Kiểm tra kết nối rồi thử lại.');
@@ -2419,7 +2454,7 @@ async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
     throw new Error('Live chưa được Firebase xác nhận. Vui lòng kiểm tra mạng rồi bấm Live lại.');
   }
 
-  /* V4 BROADCAST: ghi thêm 1 bản CURRENT chung để mọi website nhúng nhận được
+  /* V5 BROADCAST + CASE KEY: ghi thêm 1 bản CURRENT chung để mọi website nhúng nhận được
      mà KHÔNG cần đoán tên nhân viên đang mở trang. Hộp thư riêng phía trên vẫn giữ nguyên. */
   const broadcastPayload = { ...payload, broadcastId: id, publishedAt: Date.now(), source: 'HUYEN_ANALYSIS_LIVE_V4_BROADCAST' };
   const broadcastPath = 'huyenLiveBroadcast/current';
@@ -5852,26 +5887,38 @@ function Popups({
     if (!staffName) return () => {};
     const staffKey = huyenLiveStaffKey(staffName);
 
+    const payloadCaseKey = (x) => String(x?.caseKey || huyenLiveCaseKey(x?.staffName || staffName, x?.customerId, x?.customerName));
     const acceptPayload = (x) => {
       if (!x || x.acknowledgedAt) return false;
       if (x.staffKey && String(x.staffKey) !== staffKey) return false;
+      const ck = payloadCaseKey(x);
+      const ackAt = huyenLiveCaseAckAt(ck);
+      if (ackAt && (!x.createdAt || Number(x.createdAt) <= ackAt)) return false;
       return true;
     };
     const check = async () => {
       try {
         const raw = await dbGet(`huyenLive/${staffKey}`);
         if (dead || !raw || typeof raw !== 'object') return;
-        const pending = Object.values(raw)
-          .filter(acceptPayload)
-          .sort((a,b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
-        if (pending.length) setLiveNotice(prev => prev || pending[0]);
+        const byCase = {};
+        Object.values(raw).filter(acceptPayload).forEach(x => {
+          const ck = payloadCaseKey(x);
+          if (!byCase[ck] || Number(x.createdAt || 0) > Number(byCase[ck].createdAt || 0)) byCase[ck] = { ...x, caseKey: ck };
+        });
+        const pending = Object.values(byCase).sort((a,b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+        setLiveNotice(prev => {
+          if (prev && acceptPayload(prev)) return prev;
+          return pending[0] || null;
+        });
       } catch (e) { /* im lặng, vòng sau thử lại */ }
     };
     const onPublished = (ev) => {
       const x = ev?.detail;
       if (dead) return;
-      if (x && acceptPayload(x) && huyenLiveStaffKey(x.staffName || '') === staffKey) setLiveNotice(prev => prev || x);
-      else setTimeout(check, 150);
+      if (x && acceptPayload(x) && huyenLiveStaffKey(x.staffName || '') === staffKey) {
+        const item = { ...x, caseKey: payloadCaseKey(x) };
+        setLiveNotice(prev => (prev && acceptPayload(prev)) ? prev : item);
+      } else setTimeout(check, 150);
     };
     try { window.addEventListener('ideco:huyen-live-published', onPublished); } catch (e) {}
     timer = setTimeout(() => { check(); interval = setInterval(check, 10000); }, 10000);
@@ -5886,12 +5933,16 @@ function Popups({
     const staffName = huyenLiveCanonicalStaffName(liveNotice.staffName || currentStaff?.name || '');
     if (!staffName) return;
     const staffKey = String(liveNotice.staffKey || huyenLiveStaffKey(staffName));
+    const caseKey = String(liveNotice.caseKey || huyenLiveCaseKey(staffName, liveNotice.customerId, liveNotice.customerName));
+    const ackAt = Date.now();
     setLiveAckBusy(true); setLiveAckError('');
     try {
       const ok = await dbUpdate(`huyenLive/${staffKey}/${liveNotice.id}`, {
-        acknowledgedAt: Date.now(), acknowledgedBy: huyenLiveCanonicalStaffName(currentStaff?.name || staffName)
+        acknowledgedAt: ackAt, acknowledgedBy: huyenLiveCanonicalStaffName(currentStaff?.name || staffName), caseKey
       });
       if (!ok) throw new Error('Chưa ghi nhận được “Đã hiểu”. Vui lòng kiểm tra mạng và bấm lại.');
+      /* Một lần Đã hiểu sẽ loại toàn bộ Live cũ/trùng của đúng NV + KH trên máy này. */
+      huyenLiveMarkCaseAck(caseKey, ackAt);
       setLiveNotice(null);
     } catch (e) { setLiveAckError(String(e?.message || e)); }
     finally { setLiveAckBusy(false); }
