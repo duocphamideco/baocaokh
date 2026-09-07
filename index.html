@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
 <meta name="theme-color" content="#0b2545" />
-<title>IDECO — Khai báo real time giao dịch khách hàng | MTRIET</title>
+<title>IDECO — Báo cáo giao dịch & Phân tích AI | MTRIET</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -190,6 +190,15 @@ const MASTER_KEY = "minhtriet1973";
 
 // Mật khẩu mặc định khi Firebase chưa có mật khẩu nào
 const DEFAULT_PASSWORD = "ideco2026";
+
+// ===== TÁCH VAI TRÒ HUYỀN LIVE =====
+// STAFF: ứng dụng nhân viên chỉ phân tích, tuyệt đối không phát LIVE.
+// MANAGER_LIVE: ứng dụng quản trị được phép phát LIVE sang widget riêng.
+const IDECO_APP_ROLE = "STAFF";
+const IDECO_IS_MANAGER_LIVE = IDECO_APP_ROLE === "MANAGER_LIVE";
+const IDECO_CAN_PUBLISH_HUYEN_LIVE = IDECO_IS_MANAGER_LIVE;
+// Kiến trúc mới: thông báo LIVE chỉ hiển thị qua widget HUYỀN LIVE riêng, tránh popup trùng trong app báo cáo.
+const IDECO_INTERNAL_LIVE_RECEIVER = false;
 /* Mat khau bat buoc khi xoa file danh sach khach hang da upload */
 const DELETE_PASSWORD  = "minhtriet1973";
 
@@ -2427,6 +2436,7 @@ function formatHuyenAdvisorForLive(customer, r, mode = 'fast') {
 }
 
 async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
+  if (!IDECO_CAN_PUBLISH_HUYEN_LIVE) throw new Error('LIVE chỉ được phát từ ứng dụng QUẢN TRỊ HUYỀN LIVE.');
   const staffName = huyenLiveCanonicalStaffName(customer?.salesRep || '');
   if (!staffName) throw new Error('Hồ sơ chưa có Nhân viên phụ trách nên chưa thể gửi Live.');
   const id = `live_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
@@ -4292,7 +4302,7 @@ function App() {
             </div>
             <div className="leading-tight">
               <p className="font-display text-[19px] font-extrabold tracking-tight text-ink">IDECO</p>
-              <p className="text-[10px] font-bold tracking-[.18em] uppercase text-slate-400">Báo cáo giao dịch</p>
+              <p className="text-[10px] font-bold tracking-[.18em] uppercase text-slate-400">Báo cáo · Phân tích AI</p>
             </div>
           </div>
 
@@ -4684,6 +4694,9 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {IDECO_IS_MANAGER_LIVE && (
+              <span className="hidden sm:inline-flex px-3 py-2 rounded-xl bg-emerald-50 text-jade border border-emerald-200 text-[10.5px] font-extrabold tracking-[.08em]">QUẢN TRỊ LIVE</span>
+            )}
             <button onClick={() => setShowMicPicker(true)}
                     className="btn px-3 py-2 bg-paper text-slate-500 text-[11px] font-bold hover:text-brand"
                     title={`Micro: ${selectedMicLabel || 'Mặc định hệ thống'}`}>
@@ -5868,6 +5881,7 @@ function Popups({
   const [liveAckError, setLiveAckError] = useState('');
 
   const sendAdvisorLive = async (customer, result, mode) => {
+    if (!IDECO_CAN_PUBLISH_HUYEN_LIVE) { notify && notify('LIVE chỉ có trong ứng dụng quản trị.', 'warning', 4200); return; }
     if (!customer || !result || livePublishing) return;
     setLivePublishing(true);
     try {
@@ -5881,6 +5895,7 @@ function Popups({
   /* Người vào sau thời điểm phát Live vẫn nhận: sau 10 giây kiểm tra, rồi lặp mỗi 10 giây.
      Bản V2 không so tên theo chuỗi tuyệt đối nữa; đường dẫn staffKey đã là hộp thư riêng của nhân viên. */
   useEffect(() => {
+    if (!IDECO_INTERNAL_LIVE_RECEIVER) { setLiveNotice(null); setLiveAckError(''); return () => {}; }
     let dead = false, timer = null, interval = null;
     const staffName = huyenLiveCanonicalStaffName(currentStaff?.name || '');
     setLiveNotice(null); setLiveAckError('');
@@ -6442,11 +6457,13 @@ function Popups({
                   <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {directAdvisorResult.knowledgeUsed.join(' · ')}</div>
                 )}
 
-                <button onClick={() => sendAdvisorLive(advisorCustomer, directAdvisorResult, advisorMode)} disabled={livePublishing}
-                  className="btn w-full py-3.5 bg-jade text-white border border-emerald-600 text-[12px] shadow-lift disabled:opacity-60"
-                  title={`Gửi toàn bộ nội dung phân tích Live cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}>
-                  <span className="text-[15px]">●</span> {livePublishing ? 'Đang gửi Live…' : `Live · Gửi cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}
-                </button>
+                {IDECO_CAN_PUBLISH_HUYEN_LIVE && (
+                  <button onClick={() => sendAdvisorLive(advisorCustomer, directAdvisorResult, advisorMode)} disabled={livePublishing}
+                    className="btn w-full py-3.5 bg-jade text-white border border-emerald-600 text-[12px] shadow-lift disabled:opacity-60"
+                    title={`QUẢN TRỊ LIVE · Gửi toàn bộ nội dung phân tích cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}>
+                    <span className="text-[15px]">●</span> {livePublishing ? 'Đang phát LIVE…' : `QUẢN TRỊ LIVE · Gửi cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}
+                  </button>
+                )}
 
                 <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-amber-50 text-amber2 border border-amber-100 text-[11.5px]">
                   <I.Refresh width="14" height="14" /> Đọc lại dữ liệu mới nhất & phân tích lại
@@ -6798,7 +6815,7 @@ function Popups({
       </Modal>
 
       {/* HUYỀN LIVE — popup bắt buộc bấm "Đã hiểu" mới tắt; không có nút X, không đóng bằng backdrop. */}
-      {liveNotice && (
+      {IDECO_INTERNAL_LIVE_RECEIVER && liveNotice && (
         <div className="fixed inset-0 z-[2300] bg-slate-950/70 backdrop-blur-[3px] flex items-center justify-center p-3 sm:p-5">
           <div className="w-full max-w-3xl max-h-[92vh] bg-white rounded-[26px] shadow-pop border border-amber-200 overflow-hidden fade-in">
             <div className="px-5 sm:px-7 py-5 bg-gradient-to-r from-amber-50 via-white to-blue-50 border-b border-line">
