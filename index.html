@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
 <meta name="theme-color" content="#0b2545" />
-<title>IDECO — Báo cáo giao dịch & Phân tích AI | MTRIET</title>
+<title>IDECO — Khai báo real time giao dịch khách hàng | MTRIET</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -190,15 +190,6 @@ const MASTER_KEY = "minhtriet1973";
 
 // Mật khẩu mặc định khi Firebase chưa có mật khẩu nào
 const DEFAULT_PASSWORD = "ideco2026";
-
-// ===== TÁCH VAI TRÒ HUYỀN LIVE =====
-// STAFF: ứng dụng nhân viên chỉ phân tích, tuyệt đối không phát LIVE.
-// MANAGER_LIVE: ứng dụng quản trị được phép phát LIVE sang widget riêng.
-const IDECO_APP_ROLE = "STAFF";
-const IDECO_IS_MANAGER_LIVE = IDECO_APP_ROLE === "MANAGER_LIVE";
-const IDECO_CAN_PUBLISH_HUYEN_LIVE = IDECO_IS_MANAGER_LIVE;
-// Kiến trúc mới: thông báo LIVE chỉ hiển thị qua widget HUYỀN LIVE riêng, tránh popup trùng trong app báo cáo.
-const IDECO_INTERNAL_LIVE_RECEIVER = false;
 /* Mat khau bat buoc khi xoa file danh sach khach hang da upload */
 const DELETE_PASSWORD  = "minhtriet1973";
 
@@ -2436,7 +2427,6 @@ function formatHuyenAdvisorForLive(customer, r, mode = 'fast') {
 }
 
 async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
-  if (!IDECO_CAN_PUBLISH_HUYEN_LIVE) throw new Error('LIVE chỉ được phát từ ứng dụng QUẢN TRỊ HUYỀN LIVE.');
   const staffName = huyenLiveCanonicalStaffName(customer?.salesRep || '');
   if (!staffName) throw new Error('Hồ sơ chưa có Nhân viên phụ trách nên chưa thể gửi Live.');
   const id = `live_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
@@ -2483,6 +2473,273 @@ async function publishHuyenLiveAnalysis(customer, result, mode = 'fast') {
   try { window.dispatchEvent(new CustomEvent('ideco:huyen-live-published', { detail: broadcastPayload })); } catch (e) {}
   return broadcastPayload;
 }
+
+
+/* ================= SMART REPORT QUALITY GATE — kiểm tra trước khi lưu ================= */
+const DEFAULT_REPORT_QUALITY_CONFIG = Object.freeze({
+  enabled: true,
+  aiBeforeSave: true,
+  blockOnIncomplete: true,
+  minReportWords: 25,
+  minFeedbackWords: 6,
+  requireProduct: true,
+  requirePolicy: true,
+  requireFeedback: true,
+  requireNextStep: true,
+  customInstruction: 'Mỗi báo cáo cần trả lời rõ: (1) đã chào sản phẩm hoặc danh mục nào cụ thể; (2) đã trao đổi chính sách gì cụ thể như giá, chiết khấu, chương trình, công nợ, đổi trả hoặc điều kiện đơn hàng; (3) khách hàng phản hồi thực tế ra sao và phản hồi đó liên quan sản phẩm/chính sách nào; (4) bước xử lý tiếp theo và thời điểm theo dõi. Không chấp nhận các câu chung chung như “đã chào sản phẩm”, “đã gửi danh mục”, “đã trao đổi chính sách”, “khách quan tâm”, “khách xem xét” nếu không có chi tiết.'
+});
+
+function normalizeReportQualityConfig(v) {
+  const src = (v && typeof v === 'object') ? v : {};
+  const num = (x, d, min, max) => {
+    const n = Number(x);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : d;
+  };
+  return {
+    enabled: typeof src.enabled === 'boolean' ? src.enabled : DEFAULT_REPORT_QUALITY_CONFIG.enabled,
+    aiBeforeSave: typeof src.aiBeforeSave === 'boolean' ? src.aiBeforeSave : DEFAULT_REPORT_QUALITY_CONFIG.aiBeforeSave,
+    blockOnIncomplete: typeof src.blockOnIncomplete === 'boolean' ? src.blockOnIncomplete : DEFAULT_REPORT_QUALITY_CONFIG.blockOnIncomplete,
+    minReportWords: num(src.minReportWords, DEFAULT_REPORT_QUALITY_CONFIG.minReportWords, 5, 200),
+    minFeedbackWords: num(src.minFeedbackWords, DEFAULT_REPORT_QUALITY_CONFIG.minFeedbackWords, 2, 80),
+    requireProduct: typeof src.requireProduct === 'boolean' ? src.requireProduct : DEFAULT_REPORT_QUALITY_CONFIG.requireProduct,
+    requirePolicy: typeof src.requirePolicy === 'boolean' ? src.requirePolicy : DEFAULT_REPORT_QUALITY_CONFIG.requirePolicy,
+    requireFeedback: typeof src.requireFeedback === 'boolean' ? src.requireFeedback : DEFAULT_REPORT_QUALITY_CONFIG.requireFeedback,
+    requireNextStep: typeof src.requireNextStep === 'boolean' ? src.requireNextStep : DEFAULT_REPORT_QUALITY_CONFIG.requireNextStep,
+    customInstruction: String(src.customInstruction || DEFAULT_REPORT_QUALITY_CONFIG.customInstruction).trim().slice(0, 4000)
+  };
+}
+
+function reportWordCount(v) {
+  const s = String(v || '').trim();
+  return s ? s.split(/\s+/).filter(Boolean).length : 0;
+}
+
+function reportQualityIssue(code, message, question, severity = 'required') {
+  return { code, message, question, severity };
+}
+
+function reportHasSpecificProduct(report) {
+  const s = String(report || '').trim();
+  if (!s) return false;
+  /* Dấu hiệu mạnh: mã/nhãn có chữ + số, tên UVS..., hoặc cụm sau nhãn "sản phẩm/thuốc/danh mục". */
+  if (/\bUVS\s+[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9._-]{2,}(?:\s+[A-Za-zÀ-ỹ0-9._-]{2,})?/iu.test(s)) return true;
+  if (/\b[A-Za-zÀ-ỹ]{2,}[A-Z0-9][A-Za-zÀ-ỹ0-9._-]{2,}\b/u.test(s)) return true;
+  const m = s.match(/(?:sản phẩm|sp|thuốc|danh mục|nhóm sản phẩm|nhóm thuốc)\s*(?:là|gồm|:|-)?\s*([^,.;\n]{3,80})/iu);
+  if (m && m[1]) {
+    const x = m[1].trim().toLowerCase();
+    const genericOnly = /^(và|để|cho|với|đã|có|mới|cũ|của công ty|ideco|đang bán|cần bán|phù hợp|khác|này|đó|trên|dưới|cho khách|với khách)(\s|$)/iu.test(x);
+    if (!genericOnly && x.split(/\s+/).length >= 1) return true;
+  }
+  /* Tên riêng viết hoa / mã hàng trong câu chào, giới thiệu, báo giá. */
+  if (/(?:chào|giới thiệu|tư vấn|báo giá|gửi giá|gởi giá)[^.\n]{0,80}\b[A-ZĐ][A-Z0-9Đ._-]{2,}\b/u.test(s)) return true;
+  return false;
+}
+
+function reportHasSpecificPolicy(report) {
+  const s = String(report || '').toLowerCase();
+  if (!s) return false;
+  if (/(chưa|không)\s+(?:trao đổi|báo|áp dụng|gửi|gởi)\s+(?:được\s+)?(?:giá|chính sách|chiết khấu|ctkm|chương trình)[^.\n]{0,120}\b(vì|do|chờ|cần|đợi)\b/i.test(s)) return true;
+  if (/\d+(?:[.,]\d+)?\s*%/i.test(s)) return true;
+  if (/\b\d{1,3}(?:[.,]\d{3})+\s*(?:đ|đồng|vnd)\b/i.test(s)) return true;
+  if (/\b(?:công nợ|đổi trả|thanh toán|trả chậm|hỗ trợ trưng bày|thưởng doanh số|foc|ctkm|chương trình)\b[^.\n]{0,90}\b(?:\d+|ngày|tháng|hộp|chai|gói|đơn|%|đồng|vnd|tặng|mua|đổi|trả)\b/i.test(s)) return true;
+  if (/\b(?:mua|lấy)\s+\d+[^.\n]{0,60}\b(?:tặng|chiết khấu|ck|giảm|hỗ trợ)\b/i.test(s)) return true;
+  return false;
+}
+
+function reportHasUsefulFeedback(feedback, minWords = 6) {
+  const s = String(feedback || '').trim();
+  if (reportWordCount(s) < Math.max(2, Number(minWords) || 6)) return false;
+  const vague = /^(khách\s*)?(có\s*)?(phản hồi|quan tâm|xem xét|tham khảo|để xem|sẽ xem|đang xem|chưa biết|ok|đồng ý|từ chối)\s*[.!]*$/iu;
+  if (vague.test(s)) return false;
+  return /(khách|anh|chị|cô|chú|nhà thuốc|công ty|đồng ý|từ chối|quan tâm|chê|khen|giá|chiết khấu|công nợ|đổi trả|muốn|cần|yêu cầu|hỏi|đặt|mua|lấy|xem xét|chưa có nhu cầu|không nhu cầu|hẹn|phản hồi)/iu.test(s);
+}
+
+function reportHasNextStep(report, feedback) {
+  const s = `${report || ''} ${feedback || ''}`.toLowerCase();
+  return /\b(gửi|gởi|gọi|liên hệ|hẹn|theo dõi|follow|chốt|phản hồi lại|trao đổi lại|ghé lại|tư vấn lại|báo giá|gửi danh mục|gởi danh mục|xin ý kiến|trình bgđ|nhắc lại|kiểm tra lại)\b/i.test(s) ||
+         /\b(ngày|thứ|tuần|mai|mốt|chiều|sáng|tháng)\s*(?:\d{1,2})?/i.test(s);
+}
+
+function buildLocalReportAudit(report, customerFeedback, cfgInput) {
+  const cfg = normalizeReportQualityConfig(cfgInput);
+  const reportText = String(report || '').trim();
+  const feedbackText = String(customerFeedback || '').trim();
+  const issues = [];
+  const checklist = [];
+  const wc = reportWordCount(reportText);
+
+  const pushCheck = (code, label, ok, detail, issue) => {
+    checklist.push({ code, label, ok: !!ok, detail: detail || '' });
+    if (!ok && issue) issues.push(issue);
+  };
+
+  pushCheck(
+    'report_length',
+    `Nội dung báo cáo ≥ ${cfg.minReportWords} từ`,
+    wc >= cfg.minReportWords,
+    `${wc}/${cfg.minReportWords} từ`,
+    reportQualityIssue('report_length', `Nội dung báo cáo mới có ${wc} từ, chưa đủ mức tối thiểu ${cfg.minReportWords} từ.`, 'Bạn hãy mô tả rõ đã trao đổi gì, phản hồi khách hàng và bước tiếp theo.')
+  );
+
+  if (cfg.requireProduct) {
+    const ok = reportHasSpecificProduct(reportText);
+    pushCheck('product', 'Sản phẩm / danh mục cụ thể', ok, ok ? 'Đã nhận diện dấu hiệu cụ thể' : 'Đang còn chung chung',
+      reportQualityIssue('product', 'Chưa nêu rõ tên sản phẩm hoặc danh mục cụ thể đã chào/trao đổi.', 'Bạn đã chào sản phẩm nào? Tên thuốc/nhãn hàng/danh mục nào cụ thể?'));
+  }
+
+  if (cfg.requirePolicy) {
+    const ok = reportHasSpecificPolicy(reportText);
+    pushCheck('policy', 'Chính sách bán hàng cụ thể', ok, ok ? 'Có chi tiết chính sách' : 'Chưa thấy điều kiện/giá/CK/công nợ...',
+      reportQualityIssue('policy', 'Chưa nêu chính sách bán hàng cụ thể đã trao đổi hoặc lý do chưa thể trao đổi.', 'Bạn đã trao đổi chính sách gì: giá, chiết khấu %, chương trình, công nợ, đổi trả hay điều kiện đặt hàng?'));
+  }
+
+  if (cfg.requireFeedback) {
+    const ok = reportHasUsefulFeedback(feedbackText, cfg.minFeedbackWords);
+    pushCheck('feedback', 'Phản hồi thực tế của khách', ok, ok ? `${reportWordCount(feedbackText)} từ phản hồi` : 'Phản hồi còn thiếu hoặc quá chung',
+      reportQualityIssue('feedback', 'Phản hồi khách hàng chưa đủ cụ thể để hiểu khách đang đồng ý/từ chối/vướng ở đâu.', 'Khách hàng phản hồi cụ thể ra sao? Với sản phẩm/chính sách nào? Lý do hoặc điều kiện của khách là gì?'));
+  }
+
+  if (cfg.requireNextStep) {
+    const ok = reportHasNextStep(reportText, feedbackText);
+    pushCheck('next_step', 'Bước xử lý tiếp theo', ok, ok ? 'Đã thấy hành động theo dõi' : 'Chưa thấy bước tiếp theo',
+      reportQualityIssue('next_step', 'Chưa nêu rõ bước xử lý tiếp theo hoặc thời điểm theo dõi.', 'Tiếp theo bạn sẽ làm gì và khi nào: gửi báo giá/danh mục, gọi lại, hẹn gặp hay xin hỗ trợ BGĐ?'));
+  }
+
+  return {
+    pass: issues.length === 0,
+    source: 'local',
+    issues,
+    checklist,
+    detected: {
+      product: checklist.find(x => x.code === 'product')?.ok ? 'Có dấu hiệu cụ thể' : '',
+      policy: checklist.find(x => x.code === 'policy')?.ok ? 'Có chi tiết' : '',
+      feedback: checklist.find(x => x.code === 'feedback')?.ok ? feedbackText : '',
+      nextStep: checklist.find(x => x.code === 'next_step')?.ok ? 'Có bước theo dõi' : ''
+    },
+    note: ''
+  };
+}
+
+function normalizeAiReportIssues(items, cfg) {
+  const allowed = new Set(['report_length','product','policy','feedback','next_step','vague','custom']);
+  const out = [];
+  for (const x of (Array.isArray(items) ? items : [])) {
+    const code = allowed.has(String(x?.code || '').trim()) ? String(x.code).trim() : 'vague';
+    if (code === 'product' && !cfg.requireProduct) continue;
+    if (code === 'policy' && !cfg.requirePolicy) continue;
+    if (code === 'feedback' && !cfg.requireFeedback) continue;
+    if (code === 'next_step' && !cfg.requireNextStep) continue;
+    const message = String(x?.message || '').trim();
+    if (!message) continue;
+    out.push({
+      code,
+      message: message.slice(0, 500),
+      question: String(x?.question || '').trim().slice(0, 500),
+      severity: 'required'
+    });
+  }
+  return out;
+}
+
+async function analyzeReportBeforeSaveAI(formData, cfgInput) {
+  const cfg = normalizeReportQualityConfig(cfgInput);
+  const prompt = `
+Bạn là AI kiểm soát chất lượng báo cáo giao dịch khách hàng của Công ty Dược phẩm IDECO.
+Mục tiêu: KIỂM TRA TRƯỚC KHI LƯU, không tư vấn lan man và tuyệt đối KHÔNG bịa thêm dữ kiện.
+
+QUY TẮC ĐÁNH GIÁ:
+- Chỉ công nhận thông tin có thật trong NỘI DUNG BÁO CÁO và PHẢN HỒI KHÁCH HÀNG.
+- Câu chung chung như "đã chào sản phẩm", "đã gửi danh mục", "trao đổi chính sách", "khách quan tâm", "khách xem xét", "khách chưa có nhu cầu" mà không nói rõ sản phẩm/chính sách/lý do liên quan thì xem là CHƯA ĐỦ CỤ THỂ.
+- Sản phẩm/danh mục đạt khi có tên sản phẩm, thuốc, nhãn hàng, nhóm/danh mục đủ cụ thể để BGĐ biết nhân viên đang chào gì.
+- Chính sách đạt khi nêu cụ thể nội dung đã trao đổi: giá/giá mua, chiết khấu hoặc %, chương trình, số lượng/điều kiện, công nợ, đổi trả, hỗ trợ, thưởng, thanh toán... Hoặc nói rõ CHƯA trao đổi được và có lý do thực tế.
+- Phản hồi đạt khi ghi đúng phản hồi thực tế của khách, đủ để hiểu khách đồng ý/từ chối/quan tâm/vướng gì và với sản phẩm/chính sách nào. Không suy diễn thay khách.
+- Bước tiếp theo đạt khi nêu hành động cụ thể và tốt hơn nếu có thời điểm theo dõi.
+- Nếu báo cáo dài nhưng lặp ý, mơ hồ, dùng nhiều từ mà không có dữ kiện thì vẫn KHÔNG đạt.
+- Không yêu cầu thông tin mà cấu hình đã tắt.
+- customInstruction trong cấu hình là yêu cầu bổ sung bắt buộc của BGĐ. Nếu nội dung chưa đáp ứng yêu cầu đó, thêm issue code "custom" và đặt câu hỏi bổ sung cụ thể.
+- Nếu cấu hình yêu cầu phản hồi khách hàng, phản hồi quá ngắn dưới giá trị minFeedbackWords hoặc chỉ là câu chung chung không gắn với tình huống thực tế thì vẫn xem là chưa đủ.
+- KHÔNG suy đoán hoặc tự tạo sản phẩm, chính sách, phản hồi khách hàng, số liệu hay lịch hẹn.
+
+CẤU HÌNH BGĐ:
+${JSON.stringify(cfg, null, 2)}
+
+THÔNG TIN HỒ SƠ:
+- Khách hàng: ${String(formData?.name || '')}
+- Loại khách: ${String(formData?.type || '')}
+- Trạng thái: ${String(formData?.status || '')}
+- Ngày giao dịch: ${String(formData?.transactionDate || '')}
+
+NỘI DUNG BÁO CÁO:
+${String(formData?.report || '')}
+
+PHẢN HỒI KHÁCH HÀNG:
+${String(formData?.customerFeedback || '')}
+
+Chỉ trả về JSON chuẩn, không markdown:
+{
+  "pass": true,
+  "issues": [
+    {"code":"product|policy|feedback|next_step|vague|custom","message":"Thiếu/chưa rõ gì","question":"Câu hỏi ngắn để nhân viên bổ sung đúng dữ kiện"}
+  ],
+  "detected": {
+    "product":"Tên sản phẩm/danh mục AI thực sự đọc thấy, không có để trống",
+    "policy":"Chính sách AI thực sự đọc thấy, không có để trống",
+    "feedback":"Phản hồi thực tế AI đọc thấy, không có để trống",
+    "nextStep":"Bước tiếp theo AI đọc thấy, không có để trống"
+  },
+  "note":"Một câu ngắn nói vì sao đạt/chưa đạt"
+}
+`;
+  const raw = await callHuyenPrimaryAIStable(prompt, {
+    json: true,
+    temperature: 0,
+    maxTokens: 1500,
+    timeoutMs: 18000,
+    fallbackTimeoutMs: 22000
+  });
+  const r = safeJson(raw, null);
+  if (!r || typeof r !== 'object') throw new Error('REPORT_AUDIT_BAD_JSON');
+  const issues = normalizeAiReportIssues(r.issues, cfg);
+  return {
+    pass: r.pass === true && issues.length === 0,
+    source: 'ai',
+    issues,
+    detected: {
+      product: String(r?.detected?.product || '').trim().slice(0, 600),
+      policy: String(r?.detected?.policy || '').trim().slice(0, 600),
+      feedback: String(r?.detected?.feedback || '').trim().slice(0, 900),
+      nextStep: String(r?.detected?.nextStep || '').trim().slice(0, 600)
+    },
+    note: String(r.note || '').trim().slice(0, 600)
+  };
+}
+
+function mergeReportAudits(localAudit, aiAudit) {
+  const hard = (localAudit?.issues || []).filter(x => x.code === 'report_length');
+  const semantic = (aiAudit?.issues || []);
+  const seen = new Set();
+  const issues = [...hard, ...semantic].filter(x => {
+    const k = `${x.code}|${x.message}`;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  return {
+    pass: issues.length === 0,
+    source: aiAudit ? 'ai+local' : 'local',
+    issues,
+    checklist: localAudit?.checklist || [],
+    detected: aiAudit?.detected || localAudit?.detected || {},
+    note: aiAudit?.note || localAudit?.note || ''
+  };
+}
+
+function formatReportAuditMessage(audit) {
+  const issues = Array.isArray(audit?.issues) ? audit.issues : [];
+  if (!issues.length) return 'Báo cáo đã đạt các tiêu chí khai báo trước khi lưu.';
+  const body = issues.map((x, i) => `${i + 1}. ${x.message}${x.question ? `\n   → ${x.question}` : ''}`).join('\n\n');
+  return `AI phát hiện báo cáo chưa đủ cụ thể:\n\n${body}\n\nHãy bổ sung đúng dữ kiện thực tế của lần giao dịch này; không suy đoán thay khách hàng.`;
+}
+
 
 /* ================================ APP ==================================== */
 
@@ -2586,6 +2843,10 @@ function App() {
   const [adviceModal, setAdviceModal] = useState(null);
   const [reportWarningMsg, setReportWarningMsg] = useState(null);
   const [hasWarnedReport, setHasWarnedReport] = useState(false);
+  /* Cổng kiểm tra thông minh trước khi lưu — cấu hình đồng bộ Firebase */
+  const [reportQualityConfig, setReportQualityConfig] = useState(DEFAULT_REPORT_QUALITY_CONFIG);
+  const [preSaveAudit, setPreSaveAudit] = useState(null);
+  const [isPreSaveChecking, setIsPreSaveChecking] = useState(false);
 
   /* ---------- speech ---------- */
   const recognitionRef = useRef(null);
@@ -2756,7 +3017,10 @@ function App() {
       };
       setTurboControl(next);
     });
-    return () => { offStaff(); offCust(); offPass(); offKey(); offHuyenAi(); offTurboControl(); };
+    const offReportQuality = dbOnValue('settings/reportQualityConfig', (v) => {
+      setReportQualityConfig(normalizeReportQualityConfig(v));
+    });
+    return () => { offStaff(); offCust(); offPass(); offKey(); offHuyenAi(); offTurboControl(); offReportQuality(); };
   }, []);
 
   /* Danh sach khach hang tu Excel: luu tren Firebase de moi may deu dung chung */
@@ -2814,47 +3078,17 @@ function App() {
     }
   }, [isUnlocked]);
 
-  /* ============== report validation (identical rules) ============== */
+  /* ============== report validation — dùng cấu hình BGĐ, phát hiện nội dung chung chung ============== */
   const isReportValid = (text, customerFeedback = '') => {
-    if (!text || text.trim().length === 0) return { valid: false, msg: 'Vui lòng nhập nội dung báo cáo giao dịch.' };
-    const lowerText = text.toLowerCase();
-    const feedbackText = String(customerFeedback || '').toLowerCase();
-    const combinedFeedbackText = `${lowerText} ${feedbackText}`;
-    const wordCount = text.trim().split(/\s+/).length;
-
-    if (wordCount < 25) {
-      return { valid: false, msg: `Bạn ơi, báo cáo giao dịch quá ngắn (dưới 25 từ). Làm sao bàn bạc giải pháp để phát triển tiếp theo?\n\nBạn nên viết rất cụ thể tên sản phẩm/thuốc và phản hồi của khách.\n\nBạn nên hiểu việc báo cáo tốt giúp bạn quản lý tốt hơn, hiểu tình huống hơn và cấp trên của bạn và đặc biệt BGĐ hiểu rõ bạn đang giao dịch vì để hỗ trợ xử lý khi cần cho bạn. Bạn phải cập nhật tình huống khi giao dịch xong nhé. Nếu BGĐ đọc mà nội dung cũ thì không tốt. Tôi là trợ lý IDECO của BGĐ giúp bạn tốt hơn.\n\n(Lưu ý: Hệ thống sẽ KHÔNG CHO LƯU hồ sơ nếu nội dung báo cáo không rõ ràng!)` };
-    }
-
-    const hasFeedback = /(phản hồi|ý kiến|nói|bảo|chê|khen|đắt|rẻ|giá|cần|muốn|hỏi|quan tâm|ok|chốt|không nhu cầu|chưa có nhu cầu|để xem lại|gởi báo giá|gửi báo giá|hẹn lần sau|loại thuốc nào|từ chối|đồng ý|mua|lấy|xem xét|tham khảo)/i.test(combinedFeedbackText);
-    if (!hasFeedback) {
-      return { valid: false, msg: `Bạn ơi, báo cáo giao dịch mà không có nội dung phản hồi của khách hàng (ví dụ: chê giá cao, không nhu cầu, để xem lại, hãy gởi báo giá, hẹn lần sau, loại thuốc nào...)? Dù là lần đầu tiếp xúc cũng cần ghi rõ phản hồi của khách.\n\nBạn nên hiểu việc báo cáo tốt giúp bạn quản lý tốt hơn, hiểu tình huống hơn và cấp trên của bạn và đặc biệt BGĐ hiểu rõ bạn đang giao dịch vì để hỗ trợ xử lý khi cần cho bạn. Bạn phải cập nhật tình huống khi giao dịch xong nhé. Nếu BGĐ đọc mà nội dung cũ thì không tốt. Tôi là trợ lý IDECO của BGĐ giúp bạn tốt hơn.\n\n(Lưu ý: Hệ thống sẽ KHÔNG CHO LƯU hồ sơ nếu nội dung báo cáo không rõ ràng!)` };
-    }
-
-    const stopWords = 'cho|đến|tới|về|ở|tại|của|và|các|những|với';
-    let hasSpecificProduct = false;
-    try {
-      hasSpecificProduct =
-        lowerText.includes('tất cả') ||
-        new RegExp(`uvs\\s+(?!(${stopWords})\\b)\\p{L}+`, 'ui').test(lowerText) ||
-        new RegExp(`danh mục( thuốc)?\\s+(?!(${stopWords})\\b)\\p{L}+`, 'ui').test(lowerText) ||
-        new RegExp(`nhóm thuốc\\s+(?!(${stopWords})\\b)\\p{L}+`, 'ui').test(lowerText) ||
-        new RegExp(`loại thuốc\\s+(?!(${stopWords})\\b)\\p{L}+`, 'ui').test(lowerText) ||
-        new RegExp(`thuốc\\s+(?!(${stopWords})\\b)\\p{L}+`, 'ui').test(lowerText);
-    } catch (e) {
-      hasSpecificProduct = lowerText.includes('tất cả');
-    }
-
-    const genericMatch = lowerText.match(/\b(dmp|nhóm thuốc|tên thuốc|danh mục|gam thuốc|loại thuốc|nhóm sp|nhóm sản phẩm)\b/i);
-    const hasProductKeyword = /(sản phẩm|sp|máy|thiết bị|bơm|van|model|hàng|catalogue|website|web|báo giá|chào|uvs|thuốc)/i.test(lowerText);
-
-    if (genericMatch && !hasSpecificProduct) {
-      return { valid: false, msg: `Bạn ơi, bạn đang viết chung chung là "${genericMatch[0].toUpperCase()}" mà không rõ ${genericMatch[0].toUpperCase()} là gì, tên thuốc cụ thể là gì? Báo cáo giao dịch mà không cụ thể sản phẩm nào, không có ý kiến khách hàng ra sao? Làm sao bàn bạc giải pháp để phát triển tiếp theo? Bạn nên viết rất cụ thể, trình bày những gì bạn đã trao đổi, đặc biệt đã chào sản phẩm, có gởi website báo giá không? Có nội dung gì cần bàn bạc lại vế Sếp, BGĐ không? Bạn đã tính trước các tình huống phản đổi để xoay sở thuyết phục không? Nên nhớ chúng ta bán cảm xúc, bán giải pháp giúp họ kinh doanh nên nói rỏ giải pháp hơn là cứ báo cáo chung chung.` };
-    } else if (!hasProductKeyword && !hasSpecificProduct) {
-      return { valid: false, msg: `Bạn ơi, báo cáo giao dịch mà không cụ thể sản phẩm nào, không có ý kiến khách hàng ra sao? Làm sao bàn bạc giải pháp để phát triển tiếp theo? Bạn nên viết rất cụ thể, trình bày những gì bạn đã trao đổi, đặc biệt đã chào sản phẩm, có gởi website báo giá không? Có nội dung gì cần bàn bạc lại vế Sếp, BGĐ không? Bạn đã tính trước các tình huống phản đổi để xoay sở thuyết phục không? Nên nhớ chúng ta bán cảm xúc, bán giải pháp giúp họ kinh doanh nên nói rỏ giải pháp hơn là cứ báo cáo chung chung.` };
-    }
-    return { valid: true };
+    const audit = buildLocalReportAudit(text, customerFeedback, reportQualityConfig);
+    return audit.pass ? { valid: true, audit } : { valid: false, audit, msg: formatReportAuditMessage(audit) };
   };
+
+  /* Checklist tức thời để nhân viên biết còn thiếu gì ngay khi đang nhập. */
+  const liveReportAudit = useMemo(
+    () => buildLocalReportAudit(formData.report, formData.customerFeedback || '', reportQualityConfig),
+    [formData.report, formData.customerFeedback, reportQualityConfig]
+  );
 
   /* delayed report warning while typing */
   useEffect(() => {
@@ -2864,9 +3098,9 @@ function App() {
       if (!v.valid && v.msg) { setReportWarningMsg(v.msg); setHasWarnedReport(true); }
     }, 3000);
     return () => clearTimeout(t);
-  }, [formData.report, hasWarnedReport, view]);
+  }, [formData.report, formData.customerFeedback, hasWarnedReport, view, reportQualityConfig]);
 
-  useEffect(() => { setHasWarnedReport(false); setReportWarningMsg(null); }, [formData.id, view]);
+  useEffect(() => { setHasWarnedReport(false); setReportWarningMsg(null); setPreSaveAudit(null); }, [formData.id, view]);
 
   /* ============== Hall of fame ============== */
   useEffect(() => {
@@ -3134,12 +3368,64 @@ function App() {
       return;
     }
 
-    if (formData.report) {
-      const v = isReportValid(formData.report, formData.customerFeedback || '');
-      if (!v.valid && v.msg) { notify('Nhắc nhở: Báo cáo chưa đạt yêu cầu!', 'warning'); setReportWarningMsg(v.msg); }
-      else setReportWarningMsg(null);
+    if (!formData.report || !formData.report.trim()) {
+      notify('Bạn chưa nhập nội dung báo cáo giao dịch — chưa thể lưu.', 'warning', 5000);
+      setReportWarningMsg('Vui lòng nhập nội dung báo cáo giao dịch trước khi lưu.');
+      return;
+    }
+
+    /* Luôn kiểm tra trước khi lưu theo thiết lập BGĐ.
+       - Kiểm tra cục bộ chạy tức thời.
+       - AI đọc ngữ nghĩa để bắt các câu dài nhưng vẫn chung chung.
+       - Nếu AI lỗi/mạng chậm, cổng cục bộ vẫn hoạt động để không treo ứng dụng. */
+    if (reportQualityConfig.enabled) {
+      setIsPreSaveChecking(true);
+      setPreSaveAudit(null);
+      try {
+        const localAudit = buildLocalReportAudit(formData.report, formData.customerFeedback || '', reportQualityConfig);
+        let finalAudit = localAudit;
+        let aiUnavailable = false;
+
+        /* Báo cáo quá ngắn thì không tốn credit AI; các trường hợp còn lại AI sẽ kiểm tra ngữ nghĩa. */
+        if (reportQualityConfig.aiBeforeSave && reportWordCount(formData.report) >= Math.min(10, reportQualityConfig.minReportWords)) {
+          try {
+            const aiAudit = await analyzeReportBeforeSaveAI(formData, reportQualityConfig);
+            finalAudit = mergeReportAudits(localAudit, aiAudit);
+          } catch (e) {
+            console.warn('[IDECO REPORT AUDIT] AI chưa kiểm tra được, dùng kiểm tra cục bộ:', e);
+            aiUnavailable = true;
+            finalAudit = { ...localAudit, aiUnavailable: true, note: 'AI tạm chưa kết nối được; hệ thống đã dùng bộ kiểm tra cục bộ dự phòng.' };
+          }
+        }
+
+        if (!finalAudit.pass) {
+          const msg = formatReportAuditMessage(finalAudit);
+          setReportWarningMsg(null);
+          if (reportQualityConfig.blockOnIncomplete) {
+            setPreSaveAudit({ ...finalAudit, aiUnavailable });
+            notify('AI phát hiện báo cáo còn thiếu/chung chung — vui lòng bổ sung trước khi lưu.', 'warning', 6500);
+            return;
+          }
+          // BGĐ cho phép lưu dù còn thiếu: chỉ cảnh báo nhanh, không để popup che màn hình sau khi đã lưu.
+          setReportWarningMsg(null);
+          notify('Báo cáo còn điểm chưa rõ; BGĐ đang cho phép lưu kèm cảnh báo.', 'warning', 5200);
+        } else {
+          setReportWarningMsg(null);
+        }
+      } finally {
+        setIsPreSaveChecking(false);
+      }
     } else {
-      notify('Nhắc nhở: Bạn chưa nhập nội dung báo cáo giao dịch!', 'warning');
+      /* Khi BGĐ tắt cổng thông minh: không chặn theo tiêu chí sản phẩm/chính sách/phản hồi.
+         Vẫn giữ ngưỡng số từ tối thiểu để tránh lưu một báo cáo gần như trống. */
+      const wc = reportWordCount(formData.report);
+      const minWords = Math.max(5, Number(reportQualityConfig.minReportWords) || 25);
+      if (wc < minWords) {
+        const msg = `Nội dung báo cáo mới có ${wc} từ. Vui lòng bổ sung tối thiểu ${minWords} từ trước khi lưu.`;
+        setReportWarningMsg(msg);
+        notify('Báo cáo quá ngắn.', 'warning', 5000);
+        return;
+      }
     }
 
     const id = selectedCustomerId || uuid();
@@ -3293,6 +3579,26 @@ function App() {
     notify(locked
       ? `Đã khóa Huyền Turbo theo thiết lập BGĐ: ${payload.defaultOn ? 'BẬT' : 'TẮT'}`
       : `Đã lưu quyền Huyền Turbo: ${allowed ? 'cho phép nhân viên bật/tắt' : 'không cho phép sử dụng'}`, 'success', 4800);
+  };
+
+  const handleSaveReportQualityConfig = async () => {
+    if (!settingsUnlocked) { notify('Vui lòng mở khóa cài đặt trước', 'error'); return; }
+    const payload = normalizeReportQualityConfig({
+      enabled: !!document.getElementById('reportQualityEnabledInput')?.checked,
+      aiBeforeSave: !!document.getElementById('reportQualityAiInput')?.checked,
+      blockOnIncomplete: !!document.getElementById('reportQualityBlockInput')?.checked,
+      minReportWords: document.getElementById('reportQualityMinWordsInput')?.value,
+      minFeedbackWords: document.getElementById('reportQualityMinFeedbackInput')?.value,
+      requireProduct: !!document.getElementById('reportQualityProductInput')?.checked,
+      requirePolicy: !!document.getElementById('reportQualityPolicyInput')?.checked,
+      requireFeedback: !!document.getElementById('reportQualityFeedbackInput')?.checked,
+      requireNextStep: !!document.getElementById('reportQualityNextStepInput')?.checked,
+      customInstruction: document.getElementById('reportQualityInstructionInput')?.value
+    });
+    const ok = await dbSet('settings/reportQualityConfig', { ...payload, updatedAt: Date.now() });
+    if (!ok) { notify('Không lưu được thiết lập kiểm tra báo cáo lên Firebase.', 'error', 5200); return; }
+    setReportQualityConfig(payload);
+    notify('Đã lưu tiêu chí kiểm tra báo cáo — áp dụng đồng bộ cho mọi thiết bị trước khi lưu hồ sơ.', 'success', 5200);
   };
 
   const handleConfirmAlert = async () => {
@@ -4302,7 +4608,7 @@ function App() {
             </div>
             <div className="leading-tight">
               <p className="font-display text-[19px] font-extrabold tracking-tight text-ink">IDECO</p>
-              <p className="text-[10px] font-bold tracking-[.18em] uppercase text-slate-400">Báo cáo · Phân tích AI</p>
+              <p className="text-[10px] font-bold tracking-[.18em] uppercase text-slate-400">Báo cáo giao dịch</p>
             </div>
           </div>
 
@@ -4509,6 +4815,53 @@ function App() {
         </div>
       </Modal>
 
+      {/* SMART REPORT GATE — chặn lưu và hỏi lại đúng phần còn thiếu */}
+      <Modal open={!!preSaveAudit} z={1040} max="max-w-lg" onClose={() => setPreSaveAudit(null)}>
+        {preSaveAudit && (
+          <div className="p-6 sm:p-7">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-12 h-12 rounded-2xl bg-violet-50 text-violet2 flex items-center justify-center shrink-0">
+                <I.Sparkles width="22" height="22" />
+              </div>
+              <div>
+                <h3 className="font-display text-[19px] font-extrabold text-ink leading-tight">AI kiểm tra trước khi lưu</h3>
+                <p className="text-[11.5px] text-slate-400 font-semibold mt-1">Báo cáo chưa đủ cụ thể theo tiêu chí BGĐ đã thiết lập</p>
+              </div>
+            </div>
+
+            <div className="space-y-2.5 max-h-[52vh] overflow-y-auto pr-1">
+              {(preSaveAudit.issues || []).map((x, idx) => (
+                <div key={`${x.code}-${idx}`} className="spine rounded-2xl bg-amber-50/70 border border-amber-100 p-4 pl-5" style={{ '--spine': '#e08a1e' }}>
+                  <p className="text-[12.5px] font-extrabold text-amber-900">{idx + 1}. {x.message}</p>
+                  {x.question && <p className="text-[12px] text-slate-600 mt-1.5 leading-relaxed"><b>Cần bổ sung:</b> {x.question}</p>}
+                </div>
+              ))}
+
+              {preSaveAudit.detected && Object.values(preSaveAudit.detected).some(Boolean) && (
+                <div className="rounded-2xl bg-sky-50 border border-sky-100 p-4">
+                  <p className="text-[10.5px] font-extrabold uppercase tracking-wider text-brand mb-2">AI đã đọc thấy</p>
+                  {preSaveAudit.detected.product && <p className="text-[11.5px] text-slate-600 mb-1"><b>Sản phẩm/danh mục:</b> {preSaveAudit.detected.product}</p>}
+                  {preSaveAudit.detected.policy && <p className="text-[11.5px] text-slate-600 mb-1"><b>Chính sách:</b> {preSaveAudit.detected.policy}</p>}
+                  {preSaveAudit.detected.feedback && <p className="text-[11.5px] text-slate-600 mb-1"><b>Phản hồi:</b> {preSaveAudit.detected.feedback}</p>}
+                  {preSaveAudit.detected.nextStep && <p className="text-[11.5px] text-slate-600"><b>Bước tiếp theo:</b> {preSaveAudit.detected.nextStep}</p>}
+                </div>
+              )}
+
+              {preSaveAudit.aiUnavailable && (
+                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5 text-[11px] text-slate-500 leading-relaxed">
+                  AI trực tuyến tạm chưa kết nối được. Hệ thống đã dùng bộ kiểm tra cục bộ dự phòng nên vẫn phát hiện các mục thiếu cơ bản, không để ứng dụng bị treo.
+                </div>
+              )}
+            </div>
+
+            <button onClick={() => setPreSaveAudit(null)} className="btn w-full py-4 mt-5 bg-violet2 text-white text-[13px] uppercase tracking-wider shadow-lift">
+              <I.Edit width="16" height="16" /> Quay lại bổ sung báo cáo
+            </button>
+            <p className="text-[10.5px] text-slate-400 text-center mt-3 leading-relaxed">Chỉ bổ sung dữ kiện thực tế đã trao đổi với khách hàng; không suy đoán thay khách.</p>
+          </div>
+        )}
+      </Modal>
+
       {/* ============ CHON MICRO ============ */}
       <Modal open={showMicPicker} z={1060} max="max-w-md" onClose={() => setShowMicPicker(false)}>
         <div className="p-6 sm:p-7">
@@ -4694,9 +5047,6 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {IDECO_IS_MANAGER_LIVE && (
-              <span className="hidden sm:inline-flex px-3 py-2 rounded-xl bg-emerald-50 text-jade border border-emerald-200 text-[10.5px] font-extrabold tracking-[.08em]">QUẢN TRỊ LIVE</span>
-            )}
             <button onClick={() => setShowMicPicker(true)}
                     className="btn px-3 py-2 bg-paper text-slate-500 text-[11px] font-bold hover:text-brand"
                     title={`Micro: ${selectedMicLabel || 'Mặc định hệ thống'}`}>
@@ -5421,6 +5771,85 @@ function App() {
                   </div>
                 </section>
 
+                {/* KIỂM TRA THÔNG MINH BÁO CÁO TRƯỚC KHI LƯU */}
+                <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
+                  <div className="flex items-start gap-3 mb-2">
+                    <div className="w-10 h-10 rounded-xl bg-violet-50 text-violet2 flex items-center justify-center shrink-0"><I.Check2 width="18" height="18" /></div>
+                    <div>
+                      <h3 className="font-display text-[17px] font-extrabold text-ink">Kiểm tra thông minh trước khi lưu báo cáo</h3>
+                      <p className="text-[11px] text-slate-400 font-semibold">BGĐ thiết lập nội dung bắt buộc · AI phát hiện báo cáo sơ sài/chung chung</p>
+                    </div>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 mb-4 leading-relaxed">
+                    Trước khi lưu, hệ thống đọc lại báo cáo và phản hồi khách hàng. Các câu như <b>“đã chào sản phẩm”</b>, <b>“trao đổi chính sách”</b>, <b>“khách quan tâm”</b> sẽ không được xem là đủ nếu thiếu tên sản phẩm/danh mục, nội dung chính sách và phản hồi cụ thể.
+                  </p>
+
+                  <div className="space-y-3">
+                    <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-ink">Bật kiểm tra trước khi lưu</span>
+                        <span className="block text-[10.5px] text-slate-400 mt-0.5">Áp dụng cho toàn bộ nhân viên và mọi thiết bị.</span>
+                      </span>
+                      <input id="reportQualityEnabledInput" type="checkbox" defaultChecked={reportQualityConfig.enabled} key={`rq-enabled-${reportQualityConfig.enabled}`} className="w-5 h-5 accent-violet-600" />
+                    </label>
+
+                    <label className="flex items-center justify-between gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-ink">Cho AI đọc ngữ nghĩa trước khi lưu</span>
+                        <span className="block text-[10.5px] text-slate-400 mt-0.5">Bắt trường hợp viết dài nhưng vẫn mơ hồ. Nếu AI lỗi, bộ kiểm tra cục bộ tự dự phòng.</span>
+                      </span>
+                      <input id="reportQualityAiInput" type="checkbox" defaultChecked={reportQualityConfig.aiBeforeSave} key={`rq-ai-${reportQualityConfig.aiBeforeSave}`} className="w-5 h-5 accent-violet-600" />
+                    </label>
+
+                    <label className="flex items-center justify-between gap-3 bg-rose-50/60 border border-rose-100 rounded-2xl px-4 py-3 cursor-pointer">
+                      <span>
+                        <span className="block text-[12.5px] font-extrabold text-crimson">Không cho lưu khi nội dung chưa đạt</span>
+                        <span className="block text-[10.5px] text-slate-500 mt-0.5">AI sẽ chỉ rõ thiếu gì và đặt câu hỏi để nhân viên bổ sung đúng dữ kiện.</span>
+                      </span>
+                      <input id="reportQualityBlockInput" type="checkbox" defaultChecked={reportQualityConfig.blockOnIncomplete} key={`rq-block-${reportQualityConfig.blockOnIncomplete}`} className="w-5 h-5 accent-rose-500" />
+                    </label>
+
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <Field label="Số từ tối thiểu của báo cáo">
+                        <input id="reportQualityMinWordsInput" type="number" min="5" max="200" defaultValue={reportQualityConfig.minReportWords} key={`rq-words-${reportQualityConfig.minReportWords}`} className="fld" />
+                      </Field>
+                      <Field label="Số từ tối thiểu phần phản hồi khách">
+                        <input id="reportQualityMinFeedbackInput" type="number" min="2" max="80" defaultValue={reportQualityConfig.minFeedbackWords} key={`rq-fbwords-${reportQualityConfig.minFeedbackWords}`} className="fld" />
+                      </Field>
+                    </div>
+
+                    <div className="grid sm:grid-cols-2 gap-2">
+                      {[
+                        ['reportQualityProductInput','requireProduct','Sản phẩm / danh mục cụ thể','Chào sản phẩm nào? Danh mục nào?'],
+                        ['reportQualityPolicyInput','requirePolicy','Chính sách đã trao đổi','Giá/CK/chương trình/công nợ/đổi trả/điều kiện?'],
+                        ['reportQualityFeedbackInput','requireFeedback','Phản hồi thực tế của khách','Khách đồng ý/từ chối/vướng gì, với mặt hàng nào?'],
+                        ['reportQualityNextStepInput','requireNextStep','Bước xử lý tiếp theo','Sẽ làm gì tiếp và khi nào?']
+                      ].map(([id,key,label,sub]) => (
+                        <label key={id} className="flex items-start gap-3 bg-paper rounded-2xl px-4 py-3 cursor-pointer">
+                          <input id={id} type="checkbox" defaultChecked={!!reportQualityConfig[key]} key={`${id}-${reportQualityConfig[key]}`} className="w-5 h-5 mt-0.5 accent-violet-600 shrink-0" />
+                          <span>
+                            <span className="block text-[12px] font-extrabold text-ink">{label}</span>
+                            <span className="block text-[10.5px] text-slate-400 mt-0.5">{sub}</span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+
+                    <Field label="Hướng dẫn riêng của BGĐ cho AI kiểm tra">
+                      <textarea id="reportQualityInstructionInput" defaultValue={reportQualityConfig.customInstruction} key={`rq-inst-${reportQualityConfig.customInstruction}`}
+                        className="fld min-h-[150px] leading-relaxed resize-y text-[12.5px]"
+                        placeholder="VD: Bắt buộc ghi rõ tên sản phẩm, mức chiết khấu/chính sách, phản hồi khách hàng và thời điểm gọi lại..." />
+                    </Field>
+
+                    <button onClick={handleSaveReportQualityConfig} className="btn w-full py-3.5 bg-violet2 text-white text-[13px] uppercase tracking-wider shadow-lift">
+                      <I.Save width="16" height="16" /> Lưu tiêu chí kiểm tra báo cáo
+                    </button>
+                    <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                      Thiết lập được lưu tại Firebase <b>settings/reportQualityConfig</b> và tự đồng bộ. AI chỉ kiểm tra dữ kiện nhân viên đã khai, không tự bịa sản phẩm, chính sách hay phản hồi khách hàng.
+                    </p>
+                  </div>
+                </section>
+
                 {/* AI CHÍNH CHO HUYỀN — chỉ sửa đúng khu vực cài đặt AI */}
                 <section className="bg-white border border-line rounded-2xl p-5 sm:p-7">
                   <div className="flex items-center gap-3 mb-2">
@@ -5593,8 +6022,9 @@ function App() {
           </div>
           <div className="flex gap-2 shrink-0">
 
-            <button onClick={handleSaveCustomer} className="btn px-4 sm:px-5 h-10 bg-ink text-white text-[13px] shadow-lift">
-              <I.Save width="15" height="15" /> <span className="hidden xs:inline sm:inline">Lưu</span>
+            <button onClick={handleSaveCustomer} disabled={isPreSaveChecking} className="btn px-4 sm:px-5 h-10 bg-ink text-white text-[13px] shadow-lift">
+              {isPreSaveChecking ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Save width="15" height="15" />}
+              <span className="hidden xs:inline sm:inline">{isPreSaveChecking ? 'Đang kiểm tra AI' : 'Lưu'}</span>
             </button>
           </div>
         </div>
@@ -5739,6 +6169,34 @@ function App() {
                   </button>
                 </div>
               </div>
+
+              {reportQualityConfig.enabled && (
+                <div className="mb-4 rounded-2xl border border-violet-100 bg-violet-50/45 p-3.5">
+                  <div className="flex items-center justify-between gap-2 mb-2.5">
+                    <p className="text-[11px] font-extrabold text-violet2 uppercase tracking-wider">Kiểm tra nhanh nội dung đang khai</p>
+                    <span className={`text-[10px] font-extrabold px-2.5 py-1 rounded-full ${liveReportAudit.pass ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {liveReportAudit.pass ? 'Đủ dấu hiệu cơ bản' : `Còn ${liveReportAudit.issues.length} mục`}
+                    </span>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-2">
+                    {liveReportAudit.checklist.map(item => (
+                      <div key={item.code} className={`flex items-start gap-2 rounded-xl px-3 py-2.5 border ${item.ok ? 'bg-white border-emerald-100' : 'bg-white border-amber-100'}`}>
+                        <div className={`mt-0.5 ${item.ok ? 'text-jade' : 'text-amber2'}`}>
+                          {item.ok ? <I.Check2 width="15" height="15" /> : <I.AlertCircle width="15" height="15" />}
+                        </div>
+                        <div className="min-w-0">
+                          <p className={`text-[11px] font-extrabold ${item.ok ? 'text-emerald-800' : 'text-amber-800'}`}>{item.label}</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">{item.detail}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 mt-2.5 leading-relaxed">
+                    Khi bấm <b>Lưu</b>, AI sẽ đọc lại ngữ nghĩa theo thiết lập BGĐ để phát hiện báo cáo viết dài nhưng vẫn chung chung.
+                  </p>
+                </div>
+              )}
+
               <div className="mb-4">
                 <Field label="Khách hàng phản hồi">
                   <textarea value={formData.customerFeedback || ''} onFocus={() => handleFocus('customerFeedback')}
@@ -5881,7 +6339,6 @@ function Popups({
   const [liveAckError, setLiveAckError] = useState('');
 
   const sendAdvisorLive = async (customer, result, mode) => {
-    if (!IDECO_CAN_PUBLISH_HUYEN_LIVE) { notify && notify('LIVE chỉ có trong ứng dụng quản trị.', 'warning', 4200); return; }
     if (!customer || !result || livePublishing) return;
     setLivePublishing(true);
     try {
@@ -5895,7 +6352,6 @@ function Popups({
   /* Người vào sau thời điểm phát Live vẫn nhận: sau 10 giây kiểm tra, rồi lặp mỗi 10 giây.
      Bản V2 không so tên theo chuỗi tuyệt đối nữa; đường dẫn staffKey đã là hộp thư riêng của nhân viên. */
   useEffect(() => {
-    if (!IDECO_INTERNAL_LIVE_RECEIVER) { setLiveNotice(null); setLiveAckError(''); return () => {}; }
     let dead = false, timer = null, interval = null;
     const staffName = huyenLiveCanonicalStaffName(currentStaff?.name || '');
     setLiveNotice(null); setLiveAckError('');
@@ -6457,13 +6913,11 @@ function Popups({
                   <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {directAdvisorResult.knowledgeUsed.join(' · ')}</div>
                 )}
 
-                {IDECO_CAN_PUBLISH_HUYEN_LIVE && (
-                  <button onClick={() => sendAdvisorLive(advisorCustomer, directAdvisorResult, advisorMode)} disabled={livePublishing}
-                    className="btn w-full py-3.5 bg-jade text-white border border-emerald-600 text-[12px] shadow-lift disabled:opacity-60"
-                    title={`QUẢN TRỊ LIVE · Gửi toàn bộ nội dung phân tích cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}>
-                    <span className="text-[15px]">●</span> {livePublishing ? 'Đang phát LIVE…' : `QUẢN TRỊ LIVE · Gửi cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}
-                  </button>
-                )}
+                <button onClick={() => sendAdvisorLive(advisorCustomer, directAdvisorResult, advisorMode)} disabled={livePublishing}
+                  className="btn w-full py-3.5 bg-jade text-white border border-emerald-600 text-[12px] shadow-lift disabled:opacity-60"
+                  title={`Gửi toàn bộ nội dung phân tích Live cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}>
+                  <span className="text-[15px]">●</span> {livePublishing ? 'Đang gửi Live…' : `Live · Gửi cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}
+                </button>
 
                 <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-amber-50 text-amber2 border border-amber-100 text-[11.5px]">
                   <I.Refresh width="14" height="14" /> Đọc lại dữ liệu mới nhất & phân tích lại
@@ -6815,7 +7269,7 @@ function Popups({
       </Modal>
 
       {/* HUYỀN LIVE — popup bắt buộc bấm "Đã hiểu" mới tắt; không có nút X, không đóng bằng backdrop. */}
-      {IDECO_INTERNAL_LIVE_RECEIVER && liveNotice && (
+      {liveNotice && (
         <div className="fixed inset-0 z-[2300] bg-slate-950/70 backdrop-blur-[3px] flex items-center justify-center p-3 sm:p-5">
           <div className="w-full max-w-3xl max-h-[92vh] bg-white rounded-[26px] shadow-pop border border-amber-200 overflow-hidden fade-in">
             <div className="px-5 sm:px-7 py-5 bg-gradient-to-r from-amber-50 via-white to-blue-50 border-b border-line">
