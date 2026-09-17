@@ -6913,12 +6913,6 @@ function Popups({
                   <div className="text-[10.5px] text-slate-400 leading-relaxed"><b>Kho nội bộ đã tham chiếu:</b> {directAdvisorResult.knowledgeUsed.join(' · ')}</div>
                 )}
 
-                <button onClick={() => sendAdvisorLive(advisorCustomer, directAdvisorResult, advisorMode)} disabled={livePublishing}
-                  className="btn w-full py-3.5 bg-jade text-white border border-emerald-600 text-[12px] shadow-lift disabled:opacity-60"
-                  title={`Gửi toàn bộ nội dung phân tích Live cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}>
-                  <span className="text-[15px]">●</span> {livePublishing ? 'Đang gửi Live…' : `Live · Gửi cho ${advisorCustomer?.salesRep || 'nhân viên phụ trách'}`}
-                </button>
-
                 <button onClick={rerunDirectAdvisor} className="btn w-full py-3 bg-amber-50 text-amber2 border border-amber-100 text-[11.5px]">
                   <I.Refresh width="14" height="14" /> Đọc lại dữ liệu mới nhất & phân tích lại
                 </button>
