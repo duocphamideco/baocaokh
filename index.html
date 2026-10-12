@@ -147,6 +147,51 @@ tailwind.config = {
   .line-clamp-2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .safe-b{padding-bottom:env(safe-area-inset-bottom)}
   #root{height:100%}
+
+/* Mobile declaration editor: one scroll surface and thumb-sized controls. */
+.report-editor-scroll{display:contents}
+.report-mobile-nav,.report-mobile-save{display:none}
+.report-section-title{font-size:16px;font-weight:800;color:#0b2545}
+.report-input-label{display:block;margin:0 0 8px;font-size:13px;font-weight:700;color:#0b2545}
+.report-quality summary{cursor:pointer;font-size:13px;font-weight:700;color:#6d4de0;line-height:1.6}
+.report-editor [id^="report-"]{scroll-margin-top:14px}
+@media(max-width:639px){
+ .report-editor{top:var(--report-vv-top,0px)!important;bottom:auto!important;height:var(--report-vv-height,100dvh);max-width:100vw;overflow:hidden;transition:none!important}
+ .report-editor-header{padding:8px 12px!important;padding-top:max(8px,env(safe-area-inset-top))!important;min-height:64px}
+ .report-editor-header button{min-height:44px;min-width:44px}
+ .report-editor-header h2{font-size:16px}
+ .report-editor-header p{font-size:12px}
+ .report-mobile-nav{display:flex;flex-shrink:0;gap:6px;padding:8px 12px;background:#fff;border-bottom:1px solid #e3e8f2;overflow-x:auto;scrollbar-width:none}
+ .report-mobile-nav button{flex:1 0 auto;min-height:40px;border:1px solid #dce5ef;border-radius:12px;background:#f4f6fb;color:#264368;font-size:12px;font-weight:700;padding:8px 10px;white-space:nowrap}
+ .report-mobile-nav button:focus-visible{outline:2px solid #1d6fd0;outline-offset:-2px}
+ .report-editor-scroll{display:block;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;scroll-padding:14px}
+ .report-editor-fields{overflow:visible!important;padding:12px!important}
+ .report-editor-fields section{padding:16px!important;min-width:0;box-shadow:0 3px 16px #0b254508}
+ .report-editor .fld{font-size:16px!important;line-height:1.5;min-height:48px;max-width:100%;min-width:0;scroll-margin:20px 0}
+ .report-editor input[type="date"],.report-editor input[type="time"]{width:100%;appearance:none;-webkit-appearance:none}
+ .report-editor textarea{resize:vertical!important;min-height:116px}
+ .report-editor button{touch-action:manipulation}
+ .report-editor .btn{min-height:44px;white-space:normal;line-height:1.4}
+ .report-voice{padding:14px 12px!important;background:linear-gradient(135deg,#f0f6ff,#fff)!important}
+ .report-voice-actions{display:grid!important;grid-template-columns:1fr 1fr!important}
+ .report-voice-actions button{padding:12px 8px!important;font-size:13px!important}
+ .report-status-options{grid-template-columns:1fr 1fr!important}
+ .report-status-options button{padding:10px!important;font-size:12px!important;min-height:52px!important}
+ .report-ai-actions{width:100%;display:grid!important;grid-template-columns:1fr 1fr;gap:8px}
+ .report-ai-actions button{font-size:12px!important;padding:10px 6px!important}
+ .report-mobile-save{display:flex;gap:10px;align-items:center;flex-shrink:0;padding:10px 12px;padding-bottom:max(10px,env(safe-area-inset-bottom));background:#fff;border-top:1px solid #dce5ef;box-shadow:0 -4px 18px #0b25450a}
+ .report-save-context{flex:1;min-width:0}
+ .report-save-context strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#0b2545;font-size:13px}
+ .report-save-context span{display:block;color:#65758b;font-size:10px;margin-top:3px}
+ .report-mobile-save>.btn{min-height:48px;padding:12px 18px;border-radius:14px;font-size:14px;flex-shrink:0}
+ .report-editor button:disabled{opacity:.55}
+ .report-editor.keyboard-open .report-mobile-nav,.report-editor.keyboard-open .report-save-context{display:none}
+ .report-editor.keyboard-open .report-mobile-save{padding:6px 12px;justify-content:flex-end}
+ .report-editor.keyboard-open .report-mobile-save>.btn{min-height:40px;padding:8px 16px}
+ .report-editor-fields .grid>*{min-width:0}
+}
+@media(max-width:359px){.report-mobile-nav{gap:4px}.report-mobile-nav button{padding:7px;font-size:11px}.report-save-context span{display:none}}
+
 </style>
 </head>
 <body>
@@ -6163,9 +6208,9 @@ function App() {
       </main>
 
       {/* ============================ EDITOR ============================ */}
-      <div className={`fixed inset-0 bg-paper z-[100] flex flex-col transition-transform duration-300 ease-out ${view === 'editor' ? 'translate-x-0' : 'translate-x-full'}`}>
-        <div className="bg-white border-b border-line px-4 py-3 flex items-center justify-between gap-2 shrink-0">
-          <button onClick={() => setView('main')} className="w-10 h-10 rounded-xl bg-paper text-slate-400 hover:text-brand flex items-center justify-center shrink-0">
+      <div id="mobile-report-editor" aria-hidden={view !== 'editor'} className={`report-editor fixed inset-0 bg-paper z-[100] flex flex-col transition-transform duration-300 ease-out ${view === 'editor' ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="report-editor-header bg-white border-b border-line px-4 py-3 flex items-center justify-between gap-2 shrink-0">
+          <button aria-label="Quay lại danh sách" onClick={() => setView('main')} className="w-10 h-10 rounded-xl bg-paper text-slate-400 hover:text-brand flex items-center justify-center shrink-0">
             <I.ArrowLeft width="18" height="18" />
           </button>
           <div className="text-center min-w-0">
@@ -6176,38 +6221,44 @@ function App() {
 
             <button onClick={handleSaveCustomer} disabled={isPreSaveChecking} className="btn px-4 sm:px-5 h-10 bg-ink text-white text-[13px] shadow-lift">
               {isPreSaveChecking ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Save width="15" height="15" />}
-              <span className="hidden xs:inline sm:inline">{isPreSaveChecking ? 'Đang kiểm tra AI' : 'Lưu'}</span>
+              <span>{isPreSaveChecking ? 'Đang kiểm tra…' : 'Lưu'}</span>
             </button>
           </div>
         </div>
 
+        <nav className="report-mobile-nav" aria-label="Chuyển nhanh phần khai báo">
+          {[["report-voice","Nhập nhanh"],["report-identity","Khách hàng"],["report-content","Báo cáo"],...(!(formData.status === TransactionStatus.THANH_CONG || formData.status === TransactionStatus.THANH_CONG_SP_MOI || formData.status === TransactionStatus.KHONG_THANH_CONG) ? [["report-appointments","Lịch hẹn"]] : [])].map(([id,label]) =>
+            <button type="button" key={id} onClick={() => { document.activeElement?.blur(); document.getElementById(id)?.scrollIntoView({block:'start',behavior:'smooth'}); }}>{label}</button>
+          )}
+        </nav>
+        <div className="report-editor-scroll">
         {/* Khai bao nhanh bang giong noi / van ban + AI */}
-        <div className="bg-white border-b border-line px-4 py-3 shrink-0">
+        <div id="report-voice" className="report-voice bg-white border-b border-line px-4 py-3 shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <div>
                 <p className="font-display text-[13px] font-extrabold text-ink flex items-center gap-2"><I.Mic width="15" height="15" className="text-brand" /> Khai báo nhanh bằng giọng nói / văn bản</p>
-                <p className="text-[10.5px] text-slate-400 mt-0.5">Gemini 3.6 Flash sẽ đọc hiểu và tự điền biểu mẫu phía dưới</p>
+                <p className="text-[10.5px] text-slate-400 mt-0.5">Nói hoặc nhập nội dung, bấm tự điền rồi kiểm tra trước khi lưu.</p>
               </div>
               <button onClick={() => setShowMicPicker(true)} className="btn px-3 py-2 bg-paper text-slate-500 text-[11px]" title="Chọn thiết bị micro">
                 <I.Settings width="13" height="13" /> <span className="max-w-[150px] truncate">{selectedMicLabel || 'Chọn micro'}</span>
               </button>
             </div>
-            <textarea value={voiceDeclaration} onChange={e => setVoiceDeclaration(e.target.value)}
+            <textarea aria-label="Nội dung khai báo nhanh" value={voiceDeclaration} onChange={e => setVoiceDeclaration(e.target.value)}
               placeholder="Khai tên doanh nghiệp, tên người liên hệ, số điện thoại, địa chỉ, thuộc dạng (Nhà Thuốc, Công ty dược, đại lý mỹ phẩm, chuỗi nhà thuốc, khác). Hãy trình bày càng cụ thể nội dung đã trao đổi với khách hàng có tính cập nhật."
               className="fld leading-relaxed text-[13px]"
-              style={{ resize: 'both', minHeight: '118px', maxWidth: '100%', width: '100%', overflow: 'auto' }} />
-            <div className="grid sm:grid-cols-2 gap-2 mt-2">
+              style={{ resize: 'vertical', minHeight: '100px', maxWidth: '100%', width: '100%', overflow: 'auto' }} />
+            <div className="report-voice-actions grid sm:grid-cols-2 gap-2 mt-2">
               <button onClick={startVoiceDeclaration}
                 className={`btn py-3 text-[12px] border ${isVoiceDeclListening ? 'bg-crimson text-white border-crimson' : 'bg-blue-50 text-brand border-blue-100'}`}>
                 {isVoiceDeclListening
-                  ? <><span className="w-2.5 h-2.5 bg-white rounded-sm pulse-ring" /> Đang ghi giọng nói — bấm để dừng</>
-                  : <><I.Mic width="15" height="15" /> Chuyển giọng nói thành văn bản</>}
+                  ? <><span className="w-2.5 h-2.5 bg-white rounded-sm pulse-ring" /> Dừng ghi âm</>
+                  : <><I.Mic width="15" height="15" /> Nói để khai báo</>}
               </button>
               <button onClick={handleAnalyzeVoiceDeclaration} disabled={isVoiceDeclAnalyzing || !voiceDeclaration.trim()}
                 className="btn py-3 bg-violet2 text-white text-[12px] shadow-lift disabled:opacity-50">
                 {isVoiceDeclAnalyzing ? <I.Loader width="15" height="15" className="animate-spin" /> : <I.Sparkles width="15" height="15" />}
-                {isVoiceDeclAnalyzing ? 'Gemini đang phân tích…' : 'Phân tích AI & tự điền'}
+                {isVoiceDeclAnalyzing ? 'Đang tự điền…' : 'AI tự điền'}
               </button>
             </div>
             {voiceDeclNotice && (
@@ -6227,11 +6278,12 @@ function App() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 pb-24">
+        <div className="report-editor-fields flex-1 overflow-y-auto p-4 sm:p-6 pb-24">
           <div className="max-w-3xl mx-auto space-y-4">
 
             {/* identity */}
-            <section className="bg-white border border-line rounded-2xl p-5 sm:p-6 space-y-4">
+            <section id="report-identity" className="bg-white border border-line rounded-2xl p-5 sm:p-6 space-y-4">
+              <h3 className="report-section-title">Thông tin khách hàng</h3>
               <Field label="Tên khách hàng / nhà thuốc *">
                 <div className="flex gap-2">
                   <input value={formData.name} onFocus={() => handleFocus('name')}
@@ -6280,7 +6332,7 @@ function App() {
                 </Field>
               </div>
               <Field label="Trạng thái giao dịch">
-                <div className="grid gap-2">
+                <div className="report-status-options grid gap-2">
                   {Object.values(TransactionStatus).map(s => (
                     <button key={s} onClick={() => setFormData({ ...formData, status: s })}
                       className={`btn justify-start px-4 py-3 text-[13px] border text-left ${formData.status === s ? `${tone(s).solid} text-white border-transparent shadow-lift` : 'bg-paper text-slate-500 border-transparent'}`}>
@@ -6309,12 +6361,12 @@ function App() {
             </section>
 
             {/* report + AI */}
-            <section className="bg-white border border-line rounded-2xl p-5 sm:p-6">
+            <section id="report-content" className="bg-white border border-line rounded-2xl p-5 sm:p-6">
               <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
                 <h3 className="font-display text-[15px] font-extrabold text-ink flex items-center gap-2">
                   <I.Sparkles width="16" height="16" className="text-violet2" /> Báo cáo & AI tối ưu
                 </h3>
-                <div className="flex gap-2">
+                <div className="report-ai-actions flex gap-2">
                   <button onClick={handleEnhanceText} disabled={isEnhancing} className="btn px-3 py-2 bg-blue-50 text-brand text-[11px]">
                     {isEnhancing ? <I.Loader width="13" height="13" className="animate-spin" /> : <I.Sparkles width="13" height="13" />} Hoàn thiện
                   </button>
@@ -6324,8 +6376,29 @@ function App() {
                 </div>
               </div>
 
+
+              <div className="mb-4">
+                <Field label="Khách hàng phản hồi">
+                  <textarea aria-label="Khách hàng phản hồi" value={formData.customerFeedback || ''} onFocus={() => handleFocus('customerFeedback')}
+                    onChange={e => setFormData({ ...formData, customerFeedback: e.target.value })}
+                    placeholder="AI sẽ tự điền nếu phát hiện lời phản hồi của khách: quan tâm sản phẩm nào, đồng ý/từ chối, vướng giá/chính sách, yêu cầu gửi báo giá, hẹn phản hồi..."
+                    className="fld min-h-[110px] leading-relaxed resize-y text-[13.5px]" />
+                </Field>
+                <p className="text-[10.5px] text-slate-400 mt-1.5">Chỉ ghi phản hồi thực tế của khách hàng; không suy đoán thay khách.</p>
+              </div>
+
+              <label htmlFor="report-main-text" className="report-input-label">Nội dung giao dịch *</label>
+              <textarea id="report-main-text" value={formData.report} onFocus={() => handleFocus('report')}
+                onChange={e => setFormData({ ...formData, report: e.target.value })}
+                placeholder="Ghi rõ: sản phẩm/danh mục đã chào, chính sách bán hàng đã trao đổi, vướng mắc, việc cần BGĐ hỗ trợ và bước xử lý tiếp theo..."
+                className="fld h-44 leading-relaxed resize-y text-[14px]" />
+              <p className="text-[11px] text-slate-400 mt-2">
+                {formData.report ? formData.report.trim().split(/\s+/).filter(Boolean).length : 0} từ · nên từ 25 từ trở lên, có sản phẩm/danh mục, chính sách đã trao đổi và bước xử lý tiếp theo.
+              </p>
               {reportQualityConfig.enabled && (
-                <div className="mb-4 rounded-2xl border border-violet-100 bg-violet-50/45 p-3.5">
+                <details className="report-quality mt-4 rounded-2xl border border-violet-100 bg-violet-50/45 p-3.5">
+                  <summary>Gợi ý hoàn thiện báo cáo · {liveReportAudit.pass ? 'Đủ nội dung cơ bản' : `${liveReportAudit.issues.length} mục cần bổ sung`}</summary>
+                  <div className="mt-3">
                   <div className="flex items-center justify-between gap-2 mb-2.5">
                     <p className="text-[11px] font-extrabold text-violet2 uppercase tracking-wider">Kiểm tra nhanh nội dung đang khai</p>
                     <span className={`text-[10px] font-extrabold px-2.5 py-1 rounded-full ${liveReportAudit.pass ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
@@ -6349,30 +6422,14 @@ function App() {
                     Khi bấm <b>Lưu</b>, AI sẽ đọc lại ngữ nghĩa theo thiết lập BGĐ để phát hiện báo cáo viết dài nhưng vẫn chung chung.
                   </p>
                 </div>
+                </details>
               )}
 
-              <div className="mb-4">
-                <Field label="Khách hàng phản hồi">
-                  <textarea value={formData.customerFeedback || ''} onFocus={() => handleFocus('customerFeedback')}
-                    onChange={e => setFormData({ ...formData, customerFeedback: e.target.value })}
-                    placeholder="AI sẽ tự điền nếu phát hiện lời phản hồi của khách: quan tâm sản phẩm nào, đồng ý/từ chối, vướng giá/chính sách, yêu cầu gửi báo giá, hẹn phản hồi..."
-                    className="fld min-h-[110px] leading-relaxed resize-y text-[13.5px]" />
-                </Field>
-                <p className="text-[10.5px] text-slate-400 mt-1.5">Chỉ ghi phản hồi thực tế của khách hàng; không suy đoán thay khách.</p>
-              </div>
-
-              <textarea value={formData.report} onFocus={() => handleFocus('report')}
-                onChange={e => setFormData({ ...formData, report: e.target.value })}
-                placeholder="Ghi rõ: sản phẩm/danh mục đã chào, chính sách bán hàng đã trao đổi, vướng mắc, việc cần BGĐ hỗ trợ và bước xử lý tiếp theo..."
-                className="fld h-44 leading-relaxed resize-y text-[14px]" />
-              <p className="text-[11px] text-slate-400 mt-2">
-                {formData.report ? formData.report.trim().split(/\s+/).filter(Boolean).length : 0} từ · nên từ 25 từ trở lên, có sản phẩm/danh mục, chính sách đã trao đổi và bước xử lý tiếp theo.
-              </p>
             </section>
 
             {/* appointments */}
             {!(formData.status === TransactionStatus.THANH_CONG || formData.status === TransactionStatus.THANH_CONG_SP_MOI || formData.status === TransactionStatus.KHONG_THANH_CONG) && (
-              <section className="bg-white border border-line rounded-2xl p-5 sm:p-6">
+              <section id="report-appointments" className="bg-white border border-line rounded-2xl p-5 sm:p-6">
                 <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
                   <h3 className="font-display text-[15px] font-extrabold text-ink flex items-center gap-2">
                     <I.Clock width="16" height="16" className="text-amber2" /> Thiết lập lịch hẹn *
@@ -6421,6 +6478,14 @@ function App() {
               </section>
             )}
           </div>
+        </div>
+        </div>
+        <div className="report-mobile-save">
+          <div className="report-save-context"><strong>{formData.name || 'Khai báo giao dịch'}</strong><span>Kiểm tra thông tin trước khi lưu</span></div>
+          <button type="button" onClick={handleSaveCustomer} disabled={isPreSaveChecking} className="btn bg-ink text-white">
+            {isPreSaveChecking ? <I.Loader width="18" height="18" className="animate-spin" /> : <I.Save width="18" height="18" />}
+            {isPreSaveChecking ? 'Đang kiểm tra…' : 'Lưu báo cáo'}
+          </button>
         </div>
       </div>
     </div>
@@ -7368,6 +7433,28 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     fatal('Loi khi khoi tao ung dung.', (e && (e.message || e)) + '');
     console.error(e);
   }
+})();
+</script>
+
+<script>
+(function(){
+  var viewport=window.visualViewport;
+  function syncViewport(){
+    var editor=document.getElementById('mobile-report-editor');
+    if(!editor)return;
+    var narrow=window.matchMedia('(max-width:639px)').matches;
+    if(!narrow){editor.style.removeProperty('--report-vv-height');editor.style.removeProperty('--report-vv-top');editor.classList.remove('keyboard-open');return;}
+    var focused=editor.contains(document.activeElement)&&/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    var normalScale=!viewport||Math.abs(viewport.scale-1)<0.05;
+    if(normalScale){editor.style.setProperty('--report-vv-height',(viewport?viewport.height:window.innerHeight)+'px');editor.style.setProperty('--report-vv-top',(viewport?viewport.offsetTop:0)+'px');}
+    var keyboard=focused&&normalScale&&viewport&&window.innerHeight-viewport.height>120;
+    editor.classList.toggle('keyboard-open',!!keyboard);
+  }
+  if(viewport){viewport.addEventListener('resize',syncViewport);viewport.addEventListener('scroll',syncViewport);}
+  window.addEventListener('resize',syncViewport);
+  document.addEventListener('focusin',function(){setTimeout(syncViewport,60)});
+  document.addEventListener('focusout',function(){setTimeout(syncViewport,60)});
+  window.addEventListener('load',syncViewport);
 })();
 </script>
 </body>
